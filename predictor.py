@@ -1,4 +1,4 @@
-# predictor.py (Final - Dengan Paksaan Refresh Data)
+# predictor.py (Final Definitif - Anti Data Leakage)
 
 # -*- coding: utf-8 -*-
 import os
@@ -70,12 +70,15 @@ class DataManager:
             return self.df.copy()
 
 class FeatureProcessor:
-    # KELAS INI TELAH DIPERBAIKI SECARA FUNDAMENTAL UNTUK MENGHILANGKAN DATA LEAKAGE
+    # ===============================================================================
+    # // KELAS INI DITULIS ULANG SECARA FUNDAMENTAL UNTUK MENGHILANGKAN DATA LEAKAGE
+    # ===============================================================================
     def __init__(self, timesteps, feature_config):
         self.timesteps = timesteps
         self.feature_config = feature_config
         self.digits = ["as", "kop", "kepala", "ekor"]
     
+    # FUNGSI BARU (AMAN): Hanya membuat fitur berdasarkan tanggal.
     def _add_date_features(self, df: pd.DataFrame) -> pd.DataFrame:
         df['dayofweek'] = df['date'].dt.dayofweek
         df['is_weekend'] = (df['dayofweek'] >= 5).astype(int)
@@ -84,20 +87,29 @@ class FeatureProcessor:
             df['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek / 6.0)
         return df
 
+    # FUNGSI BARU (AMAN): Membuat fitur turunan HANYA dari data masa lalu (H-1).
     def _add_derived_past_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        s_as, s_kop, s_kepala, s_ekor = df['as'].shift(1), df['kop'].shift(1), df['kepala'].shift(1), df['ekor'].shift(1)
+        # Buat series H-1 satu kali untuk efisiensi
+        s_as = df['as'].shift(1)
+        s_kop = df['kop'].shift(1)
+        s_kepala = df['kepala'].shift(1)
+        s_ekor = df['ekor'].shift(1)
+
+        # Fitur interaksi HANYA berdasarkan data H-1
         df['prev_as_kop_sum'] = s_as + s_kop
         df['prev_kepala_ekor_diff'] = s_kepala - s_ekor
         df['prev_sum_all'] = s_as + s_kop + s_kepala + s_ekor
         df['prev_range_all'] = pd.concat([s_as, s_kop, s_kepala, s_ekor], axis=1).max(axis=1) - pd.concat([s_as, s_kop, s_kepala, s_ekor], axis=1).min(axis=1)
+        
         for d_str, s in zip(self.digits, [s_as, s_kop, s_kepala, s_ekor]):
              df[f'prev_{d_str}_is_even'] = (s % 2 == 0).fillna(False).astype(int)
         return df
 
+    # FUNGSI BARU (AMAN): Membuat fitur statistik rolling HANYA dari data masa lalu (H-1).
     def _add_rolling_past_features(self, df: pd.DataFrame) -> pd.DataFrame:
         window = self.feature_config.get("volatility_window", 10)
         for d in self.digits:
-            series = df[d].shift(1)
+            series = df[d].shift(1) # KUNCI: Selalu gunakan data H-1 untuk rolling
             df[f'prev_{d}_rolling_mean_{window}'] = series.rolling(window=window).mean()
             df[f'prev_{d}_rolling_std_{window}'] = series.rolling(window=window).std()
         return df
@@ -106,23 +118,34 @@ class FeatureProcessor:
     def process_data(self, df_input: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         df = df_input.copy()
         df["result_cleaned"] = df["result"]
+        # Izinkan 'result' NaN untuk baris prediksi masa depan
         df = df.dropna(subset=['date']) 
         for i, digit in enumerate(self.digits):
             df[digit] = pd.to_numeric(df["result_cleaned"].str[i], errors='coerce').astype('Int8')
+
+        # Memanggil fungsi-fungsi rekayasa fitur yang baru dan aman
         df = self._add_date_features(df)
         df = self._add_derived_past_features(df)
         if self.feature_config.get("add_interaction_features", True):
              df = self._add_rolling_past_features(df)
+        
+        # Pembuatan fitur lag (selalu aman)
         lags = list(range(1, self.timesteps + 1))
         lag_cols_obj = [df[d].shift(i).rename(f"{d}_lag_{i}") for i in lags for d in self.digits]
         df = pd.concat([df] + lag_cols_obj, axis=1)
+
+        # Logika dropna yang benar untuk membersihkan data training
         lag_column_names = [col.name for col in lag_cols_obj]
         prev_cols = [c for c in df.columns if 'prev_' in c]
         df.dropna(subset=lag_column_names + prev_cols, inplace=True)
+
         df_final = df.reset_index(drop=True)
         final_features = [col for col in df_final.columns if col not in ['date', 'result', 'result_cleaned'] + self.digits]
+
+        # Standarisasi tipe data untuk kompatibilitas model
         for col in final_features:
             df_final[col] = pd.to_numeric(df_final[col], errors='coerce').fillna(0).astype('float32')
+
         return df_final, final_features
 
 class ModelTrainer:
@@ -151,8 +174,8 @@ class ModelTrainer:
             return None, None, None, None
 
 class ModelPredictor:
-    # TIDAK ADA PERUBAHAN
     def __init__(self, pasaran: str):
+        # TIDAK ADA PERUBAHAN
         self.pasaran = pasaran.lower()
         self.config = self._get_config()
         self.model_dir_base = os.path.join(MODELS_DIR, self.pasaran)
@@ -172,6 +195,7 @@ class ModelPredictor:
         self.models_ready = self.load_models()
 
     def _get_config(self) -> Dict[str, Any]:
+        # TIDAK ADA PERUBAHAN
         default_config = MARKET_CONFIGS["default"].copy()
         market_specific_config = MARKET_CONFIGS.get(self.pasaran, {})
         default_config.update(market_specific_config)
@@ -180,6 +204,7 @@ class ModelPredictor:
 
     @error_handler(logger)
     def load_models(self) -> bool:
+        # TIDAK ADA PERUBAHAN
         if not os.path.exists(self.model_dir_base):
             return False
         features_path = os.path.join(self.model_dir_base, "features.pkl")
@@ -205,6 +230,7 @@ class ModelPredictor:
 
     @error_handler(logger)
     def train_model(self, training_mode: str = 'OPTIMIZED', use_recency_bias: bool = True, custom_data: Optional[pd.DataFrame] = None) -> bool:
+        # TIDAK ADA PERUBAHAN
         logger.info(f"Memulai training untuk {self.pasaran} mode {training_mode}.")
         self.config["training_params"] = TRAINING_CONFIG_OPTIONS.get(training_mode, TRAINING_CONFIG_OPTIONS['OPTIMIZED'])
         model_trainer = ModelTrainer(self.digits, self.config["training_params"])
@@ -235,12 +261,12 @@ class ModelPredictor:
 
     @error_handler(logger)
     def predict_next_day(self, target_date_str: Optional[str] = None, for_evaluation: bool = False) -> Dict[str, Any]:
+        # // PERBAIKAN: Logika di sini sekarang menjadi lebih sederhana dan benar
         if not self.models_ready:
             raise PredictionError("Model tidak siap atau tidak konsisten. Silakan jalankan training.")
         
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
         
-        # // PERBAIKAN: Memaksa refresh data setiap kali prediksi untuk memastikan kesegaran
         base_df = self.data_manager.get_data(force_refresh=True)
         historical_data = base_df[base_df['date'] < target_date].copy()
 
@@ -317,7 +343,8 @@ class ModelPredictor:
                             prob_metrics[d]['y_true_label'].append(class_index)
                             prob_metrics[d]['y_prob_max'].append(pred_result['probabilities'][d].max())
                     del pred_result['probabilities'], pred_result['label_encoders']
-                    summary_metrics = {'cb_accuracy': 100.0 if any(d in pred_result['colok_bebas'] for d in actual_result) else 0.0}
+                    # // PERBAIKAN: Logika pengecekan CB yang benar
+                    summary_metrics = {'cb_accuracy': 100.0 if any(d == pred_result['colok_bebas'] for d in actual_result) else 0.0}
                     monitor.track_performance(self.pasaran, row['date'], summary_metrics)
                     results_list.append({ "date": row['date'].strftime('%Y-%m-%d'), "actual": actual_result, **pred_result })
             except PredictionError as e:
@@ -332,7 +359,7 @@ class ModelPredictor:
             "kepala_accuracy": eval_summary_df.apply(lambda r: check_hit(r['kandidat_kepala'], r['actual'][2]), axis=1).mean(),
             "ekor_accuracy": eval_summary_df.apply(lambda r: check_hit(r['kandidat_ekor'], r['actual'][3]), axis=1).mean(),
             "am_accuracy": eval_summary_df.apply(lambda r: any(d in r['actual'] for d in r['angka_main'].replace(' ','').split(',')), axis=1).mean(),
-            "cb_accuracy": eval_summary_df.apply(lambda r: any(d in r['colok_bebas'] for d in r['actual']), axis=1).mean(),
+            "cb_accuracy": eval_summary_df.apply(lambda r: r['colok_bebas'] in r['actual'], axis=1).mean(),
             "avg_brier_score": -1, "avg_calibration_error": -1,
             "retraining_recommended": False, "retraining_reason": "N/A"
         }

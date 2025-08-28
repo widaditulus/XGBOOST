@@ -6,7 +6,6 @@ import pandas as pd
 import requests
 from datetime import datetime
 from typing import Optional
-import time
 from io import StringIO
 
 from utils import logger, error_handler
