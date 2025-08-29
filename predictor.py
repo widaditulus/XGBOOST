@@ -168,7 +168,7 @@ class FeatureProcessor:
         prev_kepala = last_row['kepala']
         prev_ekor = last_row['ekor']
         pred_vector['prev_sum'] = prev_as + prev_kop + prev_kepala + prev_ekor
-        # --- PERBAIKAN KRITIS: Menghapus ')' ekstra ---
+        # --- PERBAIKAN KRITIS: Menghapus ')' ekstra yang menyebabkan SyntaxError ---
         pred_vector['prev_range'] = np.max([prev_as, prev_kop, prev_kepala, prev_ekor]) - np.min([prev_as, prev_kop, prev_kepala, prev_ekor])
         for d, val in zip(self.digits, [prev_as, prev_kop, prev_kepala, prev_ekor]):
             pred_vector[f'prev_{d}_is_even'] = 1 if val % 2 == 0 else 0
