@@ -95,53 +95,58 @@ class FeatureProcessor:
         Menjamin tidak ada kebocoran data dengan menghitung fitur dari data masa lalu.
         """
         df = df_input.copy()
+        df['date'] = pd.to_datetime(df['date'])
 
         # 1. Buat kolom target (digit) terlebih dahulu
         for i, digit in enumerate(self.digits):
             df[digit] = df["result"].str[i].astype('int8')
-
-        # 2. Buat fitur-fitur baru, SEMUA dihitung berdasarkan data yang di-shift (H-1)
-        # Fitur temporal (tidak bocor)
-        df['dayofweek'] = df['date'].dt.dayofweek
-        df['is_weekend'] = df['dayofweek'].isin([5, 6]).astype(int)
-        df['day_sin'] = np.sin(2 * np.pi * df['date'].dt.dayofweek / 6.0)
-        df['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek / 6.0)
-
-        # Fitur interaksi (anti-bocor)
-        df['as_kop_sum_prev'] = df['as'].shift(1) + df['kop'].shift(1)
-        df['kepala_ekor_diff_prev'] = df['kepala'].shift(1) - df['ekor'].shift(1)
-        df['as_mul_kop_prev'] = df['as'].shift(1) * df['kop'].shift(1)
-        df['kepala_mul_ekor_prev'] = df['kepala'].shift(1) * df['ekor'].shift(1)
         
-        # Fitur statistik (anti-bocor)
-        vol_window = self.feature_config.get("volatility_window", 10)
-        for d in self.digits:
-            shifted_d = df[d].shift(1)
-            df[f'{d}_skew_{vol_window}_prev'] = shifted_d.rolling(vol_window).skew()
-            df[f'{d}_kurt_{vol_window}_prev'] = shifted_d.rolling(vol_window).kurt()
+        # 2. Inisialisasi dictionary untuk menyimpan semua fitur baru
+        new_features = {}
 
-        # Fitur pola (anti-bocor)
+        # 3. Hitung fitur temporal dan interaksi
+        new_features['dayofweek'] = df['date'].dt.dayofweek
+        new_features['is_weekend'] = df['date'].dt.dayofweek.isin([5, 6]).astype(int)
+        new_features['day_sin'] = np.sin(2 * np.pi * df['date'].dt.dayofweek / 6.0)
+        new_features['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek / 6.0)
+        
+        new_features['as_kop_sum_prev'] = (df['result'].str[0].astype(int) + df['result'].str[1].astype(int)).shift(1)
+        new_features['kepala_ekor_diff_prev'] = (df['result'].str[2].astype(int) - df['result'].str[3].astype(int)).shift(1)
+        new_features['as_mul_kop_prev'] = (df['result'].str[0].astype(int) * df['result'].str[1].astype(int)).shift(1)
+        new_features['kepala_mul_ekor_prev'] = (df['result'].str[2].astype(int) * df['result'].str[3].astype(int)).shift(1)
+
+        # 4. Hitung fitur-fitur statistik dan pola
+        vol_window = self.feature_config.get("volatility_window", 10)
         adv_window = 30
         for d in self.digits:
             shifted_d = df[d].shift(1)
+            new_features[f'{d}_skew_{vol_window}_prev'] = shifted_d.rolling(vol_window).skew()
+            new_features[f'{d}_kurt_{vol_window}_prev'] = shifted_d.rolling(vol_window).kurt()
+            
             rolling_mean = shifted_d.rolling(window=adv_window, min_periods=1).mean()
             rolling_std = shifted_d.rolling(window=adv_window, min_periods=1).std().replace(0, 1)
-            df[f'{d}_zscore_prev'] = (shifted_d - rolling_mean) / rolling_std
-            df[f'{d}_streak_prev'] = self._calculate_streak(shifted_d)
-            df[f'{d}_trend_change_prev'] = self._detect_trend_changes(shifted_d)
+            new_features[f'{d}_zscore_prev'] = (shifted_d - rolling_mean) / rolling_std
+            new_features[f'{d}_streak_prev'] = self._calculate_streak(shifted_d)
+            new_features[f'{d}_trend_change_prev'] = self._detect_trend_changes(shifted_d)
 
-        # Fitur lag (inti dari model sekuensial)
+        # 5. Tambahkan fitur lag
         for d in self.digits:
             for i in range(1, self.timesteps + 1):
-                df[f'{d}_lag_{i}'] = df[d].shift(i)
+                new_features[f'{d}_lag_{i}'] = df[d].shift(i)
 
-        # 3. Kumpulkan semua nama fitur yang valid
-        self.feature_names = [col for col in df.columns if col not in ['date', 'result'] + self.digits]
+        # 6. Gabungkan semua fitur baru menjadi satu DataFrame
+        df_features = pd.DataFrame(new_features, index=df.index)
         
-        # 4. Hapus baris yang memiliki nilai NaN (terutama di awal karena operasi shift dan lag)
-        df.dropna(inplace=True)
+        # 7. Gabungkan DataFrame asli dan fitur-fitur yang baru dibuat
+        training_df = pd.concat([df, df_features], axis=1)
+
+        # 8. Kumpulkan semua nama fitur yang valid
+        self.feature_names = [col for col in training_df.columns if col not in ['date', 'result'] + self.digits]
         
-        return df
+        # 9. Hapus baris yang memiliki nilai NaN (terutama di awal karena operasi shift dan lag)
+        training_df.dropna(subset=self.feature_names + self.digits, inplace=True)
+        
+        return training_df
 
     def transform_for_prediction(self, historical_df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
         """
