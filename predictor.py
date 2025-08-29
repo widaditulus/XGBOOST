@@ -70,6 +70,7 @@ class DataManager:
 
 
 class FeatureProcessor:
+    # --- TIDAK ADA PERUBAHAN DI KELAS INI ---
     def __init__(self, timesteps, feature_config):
         self.timesteps = timesteps
         self.feature_config = feature_config
@@ -168,7 +169,6 @@ class FeatureProcessor:
         prev_kepala = last_row['kepala']
         prev_ekor = last_row['ekor']
         pred_vector['prev_sum'] = prev_as + prev_kop + prev_kepala + prev_ekor
-        # --- PERBAIKAN KRITIS: Menghapus ')' ekstra yang menyebabkan SyntaxError ---
         pred_vector['prev_range'] = np.max([prev_as, prev_kop, prev_kepala, prev_ekor]) - np.min([prev_as, prev_kop, prev_kepala, prev_ekor])
         for d, val in zip(self.digits, [prev_as, prev_kop, prev_kepala, prev_ekor]):
             pred_vector[f'prev_{d}_is_even'] = 1 if val % 2 == 0 else 0
@@ -367,7 +367,7 @@ class ModelPredictor:
         
         predictions = {}
         all_probas_for_eval = {}
-        all_candidates_with_probas = []
+        all_candidates_with_probas = {} # Diubah menjadi dict untuk menyimpan probabilitas per digit
 
         for d in self.digits:
             encoder = self.label_encoders[d]
@@ -386,17 +386,26 @@ class ModelPredictor:
             predictions[d] = [str(digit) for digit in top_two_digits]
             
             top_two_probas = probabilities[top_two_indices]
-            for digit, proba in zip(top_two_digits, top_two_probas):
-                all_candidates_with_probas.append((str(digit), proba))
+            # Menyimpan probabilitas untuk setiap kandidat digit
+            all_candidates_with_probas[d] = {str(digit): proba for digit, proba in zip(top_two_digits, top_two_probas)}
         
         kandidat_as, kandidat_kop, kandidat_kepala, kandidat_ekor = predictions['as'], predictions['kop'], predictions['kepala'], predictions['ekor']
         
         combined_candidates = kandidat_as + kandidat_kop + kandidat_kepala + kandidat_ekor
         angka_main_set = sorted(list(set(combined_candidates)))
         
-        best_cb = kandidat_ekor[0]
-        if all_candidates_with_probas:
-            best_cb = max(all_candidates_with_probas, key=lambda item: item[1])[0]
+        # --- PERBAIKAN LOGIKA COLOK BEBAS (CB) ---
+        best_cb = "N/A"
+        if angka_main_set:
+            best_proba = -1
+            # Cari digit di Angka Main dengan probabilitas tertinggi dari *posisi asalnya*
+            for digit_str in angka_main_set:
+                # Cek probabilitas digit ini di setiap posisi (AS, KOP, KEPALA, EKOR)
+                for d in self.digits:
+                    proba = all_candidates_with_probas.get(d, {}).get(digit_str, -1)
+                    if proba > best_proba:
+                        best_proba = proba
+                        best_cb = digit_str
 
         result = {
             "prediction_date": target_date.strftime("%Y-%m-%d"),
@@ -405,19 +414,19 @@ class ModelPredictor:
             "kandidat_kop": ", ".join(kandidat_kop),
             "kandidat_kepala": ", ".join(kandidat_kepala),
             "kandidat_ekor": ", ".join(kandidat_ekor),
-            "angka_main": ", ".join(angka_main_set[:4]),
+            "angka_main": ", ".join(angka_main_set[:5]), # Ambil 5 angka untuk AM
             "colok_bebas": best_cb
         }
         
+        # --- PERBAIKAN BUG `TypeError` ---
+        # Mengembalikan data tambahan sebagai tuple terpisah, bukan di dalam dictionary utama
         if for_evaluation:
-            result["probabilities"] = all_probas_for_eval
-            result["label_encoders"] = self.label_encoders
+            return result, all_probas_for_eval, self.label_encoders
             
         return result
 
     @error_handler(logger)
     def evaluate_performance(self, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
-        # --- TIDAK ADA PERUBAHAN DI evaluate_performance ---
         df = self.data_manager.get_data(force_github=True)
         eval_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
         if eval_df.empty: return {"summary": {"error": "Tidak ada data pada periode yang diminta"}, "results": []}
@@ -427,26 +436,26 @@ class ModelPredictor:
 
         for _, row in eval_df.iterrows():
             try:
-                pred_result = self.predict_next_day(row['date'].strftime('%Y-%m-%d'), for_evaluation=True)
+                # --- PERBAIKAN BUG `TypeError` ---
+                # Menangkap hasil return yang baru (tuple)
+                pred_result, probabilities, label_encoders = self.predict_next_day(row['date'].strftime('%Y-%m-%d'), for_evaluation=True)
                 actual_result = row['result']
                 
                 if pred_result and actual_result:
                     for i, d in enumerate(self.digits):
                         actual_digit = int(actual_result[i])
-                        le = pred_result['label_encoders'][d]
+                        le = label_encoders[d] # Menggunakan label_encoders dari tuple
                         if actual_digit in le.classes_:
                             y_true_one_hot = np.zeros(len(le.classes_))
                             class_index = np.where(le.classes_ == actual_digit)[0][0]
                             y_true_one_hot[class_index] = 1
                             
                             prob_metrics[d]['y_true'].append(y_true_one_hot)
-                            prob_metrics[d]['y_prob'].append(pred_result['probabilities'][d])
+                            prob_metrics[d]['y_prob'].append(probabilities[d]) # Menggunakan probabilities dari tuple
                             prob_metrics[d]['y_true_label'].append(class_index)
-                            prob_metrics[d]['y_prob_max'].append(pred_result['probabilities'][d].max())
+                            prob_metrics[d]['y_prob_max'].append(probabilities[d].max())
                     
-                    del pred_result['probabilities']
-                    del pred_result['label_encoders']
-                    
+                    # Dictionary `pred_result` sekarang sudah bersih dan siap disimpan
                     results_list.append({ "date": row['date'].strftime('%Y-%m-%d'), "actual": actual_result, **pred_result })
             except PredictionError as e:
                 logger.warning(f"Skipping evaluasi untuk {row['date'].strftime('%Y-%m-%d')}: {e}")
@@ -525,3 +534,5 @@ class ModelPredictor:
         except Exception as e:
             drift_logger.error(f"Gagal saat memeriksa drift untuk {self.pasaran}-{digit}: {e}")
             return False
+
+}
