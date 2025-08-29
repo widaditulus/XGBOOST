@@ -48,12 +48,12 @@ class DataFetcher:
         try:
             response = requests.get(self.github_url, timeout=15)
             response.raise_for_status()
-            
+
             # UPDATED: Perubahan Kunci - Memaksa kolom 'result' dibaca sebagai string (str)
             # Ini mencegah pandas salah menginterpretasikan '0410' sebagai angka 410.
             # Semua kolom lain akan diinferensikan tipenya secara otomatis.
             df = pd.read_csv(StringIO(response.text), dtype={'result': str, 'nomor': str})
-            
+
             if df.empty: raise DataFetchingError(f"Data kosong dari URL untuk {self.pasaran}")
 
             df.columns = df.columns.str.lower().str.strip()
@@ -67,9 +67,9 @@ class DataFetcher:
             df['date'] = df['date'].apply(self._parse_date)
             df.dropna(subset=['date', 'result'], inplace=True)
             df = df[['date', 'result']].sort_values('date').reset_index(drop=True)
-            
+
             save_data_to_db(self.pasaran, df)
-            
+
             return df
 
         except requests.exceptions.RequestException as e:
