@@ -16,7 +16,7 @@ from sklearn.ensemble import RandomForestClassifier
 import lightgbm as lgb
 
 from constants import (MODELS_DIR, MARKET_CONFIGS, DRIFT_THRESHOLD,
-                     ACCURACY_THRESHOLD_FOR_RETRAIN, ADAPTIVE_LEARNING_CONFIG, ENSEMBLE_CONFIG)
+                     ACCURACY_THRESHOLD_FOR_RETRAIN, ADAPTIVE_LEARNING_CONFIG, ENSEMBLE_CONFIG, FILTER_CONFIG)
 from utils import logger, error_handler, drift_logger
 from model_config import TRAINING_CONFIG_OPTIONS
 from exceptions import TrainingError, PredictionError, DataFetchingError
@@ -364,6 +364,12 @@ class ModelPredictor:
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
         base_df = self.data_manager.get_data()
         
+        # --- PERBAIKAN: Mempersiapkan data historis yang siap difilter ---
+        historical_data_for_filter = base_df.copy()
+        # Membuat kolom digit dari kolom 'result' agar dapat diakses
+        for i, digit in enumerate(self.digits):
+            historical_data_for_filter[digit] = historical_data_for_filter["result"].str[i].astype('int8')
+
         # Menggunakan metode transform_for_prediction yang baru dan aman
         latest_features = self.feature_processor.transform_for_prediction(base_df, target_date)
         
@@ -373,7 +379,9 @@ class ModelPredictor:
         predictions = {}
         all_probas_for_eval = {}
         all_candidates_with_probas = []
-
+        
+        min_hit_rate = FILTER_CONFIG.get("MIN_HISTORICAL_HIT_RATE", 0.05)
+        
         for d in self.digits:
             encoder = self.label_encoders[d]
             if not encoder: raise PredictionError(f"Encoder untuk digit '{d}' tidak tersedia.")
@@ -385,24 +393,71 @@ class ModelPredictor:
             
             probabilities = ensemble_predict_proba(current_models, latest_features)[0]
             all_probas_for_eval[d] = probabilities
-
-            top_two_indices = np.argsort(probabilities)[-2:][::-1]
-            top_two_digits = encoder.inverse_transform(top_two_indices)
-            predictions[d] = [str(digit) for digit in top_two_digits]
             
-            top_two_probas = probabilities[top_two_indices]
-            for digit, proba in zip(top_two_digits, top_two_probas):
+            # Mendapatkan semua kandidat yang diurutkan
+            top_indices = np.argsort(probabilities)[::-1]
+            all_digits_sorted = encoder.inverse_transform(top_indices)
+            
+            final_candidates = []
+            
+            # Hitung frekuensi historis untuk setiap digit
+            historical_counts = historical_data_for_filter[d].value_counts(normalize=True).to_dict()
+
+            # Filter kandidat berdasarkan hit rate historis
+            for digit_candidate in all_digits_sorted:
+                hit_rate = historical_counts.get(digit_candidate, 0)
+                if hit_rate >= min_hit_rate:
+                    final_candidates.append(str(digit_candidate))
+                
+                # Cukup ambil 2 kandidat teratas dari yang lolos filter
+                if len(final_candidates) >= 2:
+                    break
+            
+            # Logika fallback: jika kurang dari 2 kandidat lolos filter,
+            # tambahkan kandidat terbaik berikutnya dari prediksi mentah
+            if len(final_candidates) < 2:
+                for digit_candidate in all_digits_sorted:
+                    if str(digit_candidate) not in final_candidates:
+                        final_candidates.append(str(digit_candidate))
+                        if len(final_candidates) >= 2:
+                            break
+
+            predictions[d] = final_candidates
+            
+            top_two_probas = probabilities[top_indices[:2]]
+            for digit, proba in zip(all_digits_sorted, top_two_probas):
                 all_candidates_with_probas.append((str(digit), proba))
+
+        # Mengatur prediksi colok bebas berdasarkan kandidat teratas dari SEMUA posisi
+        best_cb_from_all = ""
+        highest_proba = -1
         
+        # --- PERBAIKAN: Menggunakan data yang sudah diproses untuk CB ---
+        # Gabungkan semua digit dari hasil historis ke dalam satu Series
+        all_digits_from_result = pd.concat([historical_data_for_filter[d] for d in self.digits])
+        
+        # Mengaudit semua kandidat teratas untuk menemukan CB terbaik
+        for cand, prob in all_candidates_with_probas:
+            # Periksa hit rate historis dari kandidat CB
+            candidate_int = int(cand)
+            
+            total_entries = len(all_digits_from_result)
+            cb_hit_rate = (all_digits_from_result == candidate_int).sum() / total_entries if total_entries > 0 else 0
+            
+            # Jika probabilitasnya lebih tinggi DAN hit rate-nya layak, update
+            if prob > highest_proba and cb_hit_rate >= min_hit_rate:
+                highest_proba = prob
+                best_cb_from_all = cand
+        
+        # Fallback untuk CB: jika tidak ada kandidat yang memenuhi syarat, ambil yang terbaik dari prediksi mentah
+        if not best_cb_from_all and all_candidates_with_probas:
+            best_cb_from_all = max(all_candidates_with_probas, key=lambda item: item[1])[0]
+
         kandidat_as, kandidat_kop, kandidat_kepala, kandidat_ekor = predictions['as'], predictions['kop'], predictions['kepala'], predictions['ekor']
         
         combined_candidates = kandidat_as + kandidat_kop + kandidat_kepala + kandidat_ekor
         angka_main_set = sorted(list(set(combined_candidates)))
         
-        best_cb = kandidat_ekor[0]
-        if all_candidates_with_probas:
-            best_cb = max(all_candidates_with_probas, key=lambda item: item[1])[0]
-
         result = {
             "prediction_date": target_date.strftime("%Y-%m-%d"),
             "final_4d_prediction": f"{kandidat_as[0]}{kandidat_kop[0]}{kandidat_kepala[0]}{kandidat_ekor[0]}",
@@ -411,7 +466,7 @@ class ModelPredictor:
             "kandidat_kepala": ", ".join(kandidat_kepala),
             "kandidat_ekor": ", ".join(kandidat_ekor),
             "angka_main": ", ".join(angka_main_set[:4]),
-            "colok_bebas": best_cb
+            "colok_bebas": best_cb_from_all
         }
         
         if for_evaluation:
@@ -420,7 +475,7 @@ class ModelPredictor:
             
         return result
 
-    @error_handler(logger)
+    @error_handler(drift_logger)
     def evaluate_performance(self, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
         # --- TIDAK ADA PERUBAHAN DI evaluate_performance ---
         df = self.data_manager.get_data(force_github=True)
