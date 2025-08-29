@@ -20,21 +20,21 @@ class ContinualLearner:
         """Mengambil data dari N hari terakhir sesuai konfigurasi untuk retraining."""
         window_days = self.config.get("WINDOW_DAYS", 180)
         logger.info(f"Mengambil data untuk windowed retraining: {window_days} hari terakhir.")
-        
+
         full_data = self.predictor.data_manager.get_data(force_refresh=True, force_github=True)
-        
+
         # Pastikan kolom tanggal adalah datetime
         full_data['date'] = pd.to_datetime(full_data['date'])
-        
+
         cutoff_date = full_data['date'].max() - timedelta(days=window_days)
-        
+
         windowed_df = full_data[full_data['date'] >= cutoff_date].copy()
-        
+
         # Fallback ke data penuh jika data di dalam window tidak mencukupi
         if len(windowed_df) < self.predictor.config["strategy"]["min_training_samples"]:
             logger.warning(f"Data dalam window ({len(windowed_df)}) tidak cukup. Fallback ke data penuh.")
             return full_data
-            
+
         logger.info(f"Menggunakan {len(windowed_df)} baris data untuk incremental retraining.")
         return windowed_df
 
@@ -47,13 +47,13 @@ class ContinualLearner:
         logger.info(f"Memulai incremental retraining untuk pasaran: {self.pasaran.upper()}")
         try:
             training_data = self._get_windowed_data()
-            
+
             # Memanggil fungsi train_model di predictor dengan data yang sudah difilter
             success = self.predictor.train_model(
-                use_recency_bias=True, 
+                use_recency_bias=True,
                 custom_data=training_data # Mengirim data parsial
             )
-            
+
             if success:
                 logger.info(f"Incremental retraining untuk {self.pasaran.upper()} berhasil.")
                 return True
@@ -77,7 +77,7 @@ class ContinualLearner:
         if low_accuracy or drift_detected:
             if drift_detected and not low_accuracy:
                 reason = "Feature drift terdeteksi."
-            
+
             logger.warning(f"Pemicu otomatis terdeteksi untuk {self.pasaran.upper()}. Alasan: {reason}")
             # Menjalankan retraining dalam thread baru agar tidak memblokir proses evaluasi
             thread = threading.Thread(target=self.trigger_incremental_retrain)
