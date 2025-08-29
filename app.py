@@ -73,7 +73,7 @@ def start_training(pasaran):
             return jsonify({"status": "error", "message": f"Training untuk {pasaran.upper()} sudah berjalan."}), 409
         training_status[pasaran] = 'running'
         training_status[f"{pasaran}_message"] = "Proses training dimulai..."
-    
+
     thread = threading.Thread(target=run_training_in_background, args=(pasaran, training_mode, use_recency_bias))
     thread.daemon = True
     thread.start()
@@ -146,7 +146,7 @@ def start_evaluation(pasaran):
             abort(400, description="Tanggal mulai tidak boleh setelah tanggal akhir.")
     except (ValueError, TypeError):
         abort(400, description="Format tanggal tidak valid. Gunakan YYYY-MM-DD.")
-    
+
     with evaluation_lock:
         if evaluation_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Evaluasi untuk {pasaran.upper()} sudah berjalan."}), 409
