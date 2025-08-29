@@ -25,7 +25,6 @@ from evaluation import calculate_brier_score, calculate_ece
 from ensemble_helper import train_ensemble_models, ensemble_predict_proba
 from continual_learner import ContinualLearner
 
-
 class DataManager:
     # --- TIDAK ADA PERUBAHAN DI KELAS INI ---
     def __init__(self, pasaran):
@@ -68,31 +67,16 @@ class DataManager:
                 self.df = df_sorted
             return self.df.copy()
 
+# =====================================================================================
+# PEROMBAKAN TOTAL BAGIAN FEATURE ENGINEERING UNTUK MEMASTIKAN TIDAK ADA KEBOCORAN DATA
+# =====================================================================================
 
 class FeatureProcessor:
     def __init__(self, timesteps, feature_config):
         self.timesteps = timesteps
         self.feature_config = feature_config
         self.digits = ["as", "kop", "kepala", "ekor"]
-
-    # --- PERBAIKAN KEBOCORAN DATA DI SEMUA FUNGSI FITUR ---
-    # Logika diubah untuk menggunakan .shift(1) agar fitur dihitung berdasarkan data H-1.
-    def _add_temporal_features(self, df):
-        df['dayofweek'] = df['date'].dt.dayofweek
-        df['is_weekend'] = df['dayofweek'].isin([5, 6]).astype(int)
-        df['as_kop_sum'] = df['as'].shift(1) + df['kop'].shift(1)
-        df['kepala_ekor_diff'] = df['kepala'].shift(1) - df['ekor'].shift(1)
-        return df
-
-    def _add_interaction_and_stat_features(self, df):
-        df['as_mul_kop'] = df['as'].shift(1) * df['kop'].shift(1)
-        df['kepala_mul_ekor'] = df['kepala'].shift(1) * df['ekor'].shift(1)
-        window = self.feature_config.get("volatility_window", 10)
-        for d in self.digits:
-            shifted_d = df[d].shift(1)
-            df[f'{d}_skew_{window}'] = shifted_d.rolling(window).skew()
-            df[f'{d}_kurt_{window}'] = shifted_d.rolling(window).kurt()
-        return df
+        self.feature_names = []
 
     def _calculate_streak(self, series):
         change_markers = series.ne(series.shift())
@@ -105,74 +89,112 @@ class FeatureProcessor:
         crossover = ((short_ma > long_ma) & (short_ma.shift(1) < long_ma.shift(1))) | ((short_ma < long_ma) & (short_ma.shift(1) > long_ma.shift(1)))
         return crossover.astype(int)
 
-    def _add_advanced_pattern_features(self, df):
-        window = 30
-        for d in self.digits:
-            shifted_d = df[d].shift(1)
-            rolling_mean = shifted_d.rolling(window=window, min_periods=1).mean()
-            rolling_std = shifted_d.rolling(window=window, min_periods=1).std().replace(0, 1)
-            df[f'{d}_zscore'] = ((shifted_d - rolling_mean) / rolling_std).fillna(0)
-            df[f'{d}_streak'] = self._calculate_streak(shifted_d)
-            df[f'{d}_trend_change'] = self._detect_trend_changes(shifted_d)
-        return df
-
-    def _add_frequency_based_features(self, df):
-        window = self.feature_config.get("frequency_window", 30)
-        if len(df) < window: return df
-        df['date_diff'] = df['date'].diff().dt.days.fillna(0)
-        for pos in self.digits:
-            df_shifted = df[[pos, 'date_diff']].shift(1)
-            last_seen_cumsum = df_shifted.groupby(pos)['date_diff'].cumsum()
-            df[f'{pos}_days_since_last_seen'] = last_seen_cumsum - df_shifted.groupby(pos)['date_diff'].transform('cummax') + df_shifted['date_diff']
-        return df
-
-    def _add_inter_digit_features(self, df):
-        prev_as = df['as'].shift(1)
-        prev_kop = df['kop'].shift(1)
-        prev_kepala = df['kepala'].shift(1)
-        prev_ekor = df['ekor'].shift(1)
-        df['prev_sum'] = prev_as.shift(1) + prev_kop.shift(1) + prev_kepala.shift(1) + prev_ekor.shift(1)
-        prev_digits = pd.concat([prev_as, prev_kop, prev_kepala, prev_ekor], axis=1)
-        df['prev_range'] = prev_digits.max(axis=1).shift(1) - prev_digits.min(axis=1).shift(1)
-        for i, d_str in enumerate(self.digits):
-            df[f'prev_{d_str}_is_even'] = (df[d_str].shift(1) % 2 == 0).astype(int)
-        return df
-
-    # --- PERBAIKAN UTAMA: MENGHAPUS 'is_prediction' DAN MENYATUKAN ALUR LOGIKA ---
-    @error_handler(logger)
-    def process_data(self, df_input: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    def fit_transform(self, df_input: pd.DataFrame) -> pd.DataFrame:
+        """
+        Metode ini hanya untuk training. Mengubah data historis menjadi fitur dan target.
+        Menjamin tidak ada kebocoran data dengan menghitung fitur dari data masa lalu.
+        """
         df = df_input.copy()
 
-        # Alur sekarang seragam: selalu buat kolom digit.
-        # Untuk baris prediksi (masa depan), 'result' akan NaN, sehingga kolom digit juga akan NaN.
-        df["result_cleaned"] = df["result"]
-        # Hanya proses baris yang memiliki 'result' (data historis)
-        valid_results = df["result_cleaned"].notna()
+        # 1. Buat kolom target (digit) terlebih dahulu
         for i, digit in enumerate(self.digits):
-            # Menggunakan .loc untuk memastikan operasi hanya pada baris yang valid
-            df.loc[valid_results, digit] = df.loc[valid_results, "result_cleaned"].str[i].astype('int8')
+            df[digit] = df["result"].str[i].astype('int8')
 
-        df = self._add_inter_digit_features(df)
-        if self.feature_config.get("add_cyclical_features", True):
-            df['day_sin'] = np.sin(2 * np.pi * df['date'].dt.dayofweek/6)
-            df['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek/6)
-        if self.feature_config.get("add_frequency_features", True): df = self._add_frequency_based_features(df)
-        if self.feature_config.get("add_advanced_pattern_features", True): df = self._add_advanced_pattern_features(df)
-        df = self._add_temporal_features(df)
-        if self.feature_config.get("add_interaction_features", True): df = self._add_interaction_and_stat_features(df)
+        # 2. Buat fitur-fitur baru, SEMUA dihitung berdasarkan data yang di-shift (H-1)
+        # Fitur temporal (tidak bocor)
+        df['dayofweek'] = df['date'].dt.dayofweek
+        df['is_weekend'] = df['dayofweek'].isin([5, 6]).astype(int)
+        df['day_sin'] = np.sin(2 * np.pi * df['date'].dt.dayofweek / 6.0)
+        df['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek / 6.0)
+
+        # Fitur interaksi (anti-bocor)
+        df['as_kop_sum_prev'] = df['as'].shift(1) + df['kop'].shift(1)
+        df['kepala_ekor_diff_prev'] = df['kepala'].shift(1) - df['ekor'].shift(1)
+        df['as_mul_kop_prev'] = df['as'].shift(1) * df['kop'].shift(1)
+        df['kepala_mul_ekor_prev'] = df['kepala'].shift(1) * df['ekor'].shift(1)
         
-        lags = list(range(1, self.timesteps + 1))
-        lag_cols = [df[d].shift(i).rename(f"{d}_lag_{i}") for i in lags for d in self.digits]
-        df_final = pd.concat([df] + lag_cols, axis=1)
+        # Fitur statistik (anti-bocor)
+        vol_window = self.feature_config.get("volatility_window", 10)
+        for d in self.digits:
+            shifted_d = df[d].shift(1)
+            df[f'{d}_skew_{vol_window}_prev'] = shifted_d.rolling(vol_window).skew()
+            df[f'{d}_kurt_{vol_window}_prev'] = shifted_d.rolling(vol_window).kurt()
+
+        # Fitur pola (anti-bocor)
+        adv_window = 30
+        for d in self.digits:
+            shifted_d = df[d].shift(1)
+            rolling_mean = shifted_d.rolling(window=adv_window, min_periods=1).mean()
+            rolling_std = shifted_d.rolling(window=adv_window, min_periods=1).std().replace(0, 1)
+            df[f'{d}_zscore_prev'] = (shifted_d - rolling_mean) / rolling_std
+            df[f'{d}_streak_prev'] = self._calculate_streak(shifted_d)
+            df[f'{d}_trend_change_prev'] = self._detect_trend_changes(shifted_d)
+
+        # Fitur lag (inti dari model sekuensial)
+        for d in self.digits:
+            for i in range(1, self.timesteps + 1):
+                df[f'{d}_lag_{i}'] = df[d].shift(i)
+
+        # 3. Kumpulkan semua nama fitur yang valid
+        self.feature_names = [col for col in df.columns if col not in ['date', 'result'] + self.digits]
         
-        feature_cols_to_drop = ['date', 'result', 'result_cleaned'] + self.digits
-        final_features = [col for col in df_final.columns if col not in feature_cols_to_drop]
+        # 4. Hapus baris yang memiliki nilai NaN (terutama di awal karena operasi shift dan lag)
+        df.dropna(inplace=True)
         
-        # Mengisi nilai NaN yang mungkin muncul di awal data dengan 0.
-        # RandomForest tidak bisa menangani NaN.
-        df_final[final_features] = df_final[final_features].fillna(0)
+        return df
+
+    def transform_for_prediction(self, historical_df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
+        """
+        Metode ini HANYA untuk prediksi. Membuat satu baris vektor fitur untuk tanggal target.
+        """
+        if len(historical_df) < self.timesteps:
+            raise PredictionError(f"Data historis tidak cukup ({len(historical_df)} baris) untuk membuat prediksi dengan {self.timesteps} timesteps.")
+
+        last_known_data = historical_df.iloc[-self.timesteps:].copy()
+
+        # 1. Buat kolom target (digit) untuk data historis
+        for i, digit in enumerate(self.digits):
+            last_known_data[digit] = last_known_data["result"].str[i].astype('int8')
         
-        return df_final, final_features
+        # 2. Buat DataFrame satu baris untuk prediksi
+        pred_vector = {}
+
+        # 3. Isi fitur secara eksplisit berdasarkan data historis terakhir
+        last_row = last_known_data.iloc[-1]
+        
+        # Fitur temporal
+        pred_vector['dayofweek'] = target_date.dayofweek
+        pred_vector['is_weekend'] = 1 if target_date.dayofweek in [5, 6] else 0
+        pred_vector['day_sin'] = np.sin(2 * np.pi * target_date.dayofweek / 6.0)
+        pred_vector['day_cos'] = np.cos(2 * np.pi * target_date.dayofweek / 6.0)
+        
+        # Fitur interaksi
+        pred_vector['as_kop_sum_prev'] = last_row['as'] + last_row['kop']
+        pred_vector['kepala_ekor_diff_prev'] = last_row['kepala'] - last_row['ekor']
+        pred_vector['as_mul_kop_prev'] = last_row['as'] * last_row['kop']
+        pred_vector['kepala_mul_ekor_prev'] = last_row['kepala'] * last_row['ekor']
+
+        # Fitur statistik
+        vol_window = self.feature_config.get("volatility_window", 10)
+        for d in self.digits:
+            pred_vector[f'{d}_skew_{vol_window}_prev'] = last_known_data[d].rolling(vol_window).skew().iloc[-1]
+            pred_vector[f'{d}_kurt_{vol_window}_prev'] = last_known_data[d].rolling(vol_window).kurt().iloc[-1]
+        
+        # Fitur pola
+        adv_window = 30
+        for d in self.digits:
+            rolling_mean = last_known_data[d].rolling(window=adv_window, min_periods=1).mean().iloc[-1]
+            rolling_std = last_known_data[d].rolling(window=adv_window, min_periods=1).std().replace(0, 1).iloc[-1]
+            pred_vector[f'{d}_zscore_prev'] = (last_row[d] - rolling_mean) / rolling_std
+            pred_vector[f'{d}_streak_prev'] = self._calculate_streak(last_known_data[d]).iloc[-1]
+            pred_vector[f'{d}_trend_change_prev'] = self._detect_trend_changes(last_known_data[d]).iloc[-1]
+
+        # Fitur lag
+        for d in self.digits:
+            for i in range(1, self.timesteps + 1):
+                pred_vector[f'{d}_lag_{i}'] = last_known_data[d].iloc[-i]
+
+        return pd.DataFrame([pred_vector])
 
 
 class ModelTrainer:
@@ -278,25 +300,16 @@ class ModelPredictor:
         model_trainer = ModelTrainer(self.digits, self.config["training_params"])
         os.makedirs(self.model_dir_base, exist_ok=True)
         
-        if custom_data is not None and not custom_data.empty:
-            logger.info(f"Menggunakan custom data ({len(custom_data)} baris) untuk training.")
-            df_full = custom_data
-        else:
-            logger.info("Mengambil data penuh dari data manager untuk training.")
-            df_full = self.data_manager.get_data(force_refresh=True, force_github=True)
-
-        # Memanggil process_data yang sudah disatukan logikanya
-        processed_df, features = self.feature_processor.process_data(df_full)
+        df_full = custom_data if custom_data is not None and not custom_data.empty else self.data_manager.get_data(force_refresh=True, force_github=True)
         
-        # --- PERBAIKAN LOGIKA: Membersihkan data training SETELAH pembuatan fitur ---
-        # DataFrame untuk training hanya berisi baris di mana target (digit) tidak kosong
-        training_df = processed_df.dropna(subset=self.digits).copy()
+        # Menggunakan metode fit_transform yang baru dan aman
+        training_df = self.feature_processor.fit_transform(df_full)
+        self.feature_names = self.feature_processor.feature_names
         
         min_samples = self.config["strategy"]["min_training_samples"]
         if len(training_df) < min_samples:
             raise TrainingError(f"Data tidak cukup untuk training setelah diproses. Perlu {min_samples}, tersedia {len(training_df)}.")
         
-        self.feature_names = features
         joblib.dump(self.feature_names, os.path.join(self.model_dir_base, "features.pkl"))
         logger.info(f"Menyimpan {len(self.feature_names)} nama fitur ke features.pkl.")
 
@@ -310,15 +323,13 @@ class ModelPredictor:
         
         for digit in self.digits:
             y_full = training_df[digit]
-            if y_full.nunique() < 2:
-                logger.warning(f"Skipping '{digit}', hanya 1 nilai unik.")
-                continue
+            X_full = training_df[self.feature_names]
+            
+            if y_full.nunique() < 2: continue
             
             existing_model = self.models.get(digit) if self.models_ready else None
             model, le, importance, y_encoded = model_trainer.train_digit_model(
-                training_df[self.feature_names], 
-                y_full, 
-                digit, 
+                X_full, y_full, digit, 
                 existing_model=existing_model,
                 sample_weights=sample_weights
             )
@@ -330,7 +341,7 @@ class ModelPredictor:
                 
                 if ENSEMBLE_CONFIG.get("USE_ENSEMBLE"):
                     train_ensemble_models(
-                        X=training_df[self.feature_names],
+                        X=X_full,
                         y_encoded=y_encoded,
                         model_dir_base=self.model_dir_base,
                         digit=digit
@@ -340,7 +351,6 @@ class ModelPredictor:
         self.models_ready = self.load_models()
         return self.models_ready
 
-    # --- PERBAIKAN LOGIKA PREDIKSI ---
     @error_handler(logger)
     def predict_next_day(self, target_date_str: Optional[str] = None, for_evaluation: bool = False) -> Dict[str, Any]:
         if not self.models_ready:
@@ -349,19 +359,11 @@ class ModelPredictor:
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
         base_df = self.data_manager.get_data()
         
-        future_row = pd.DataFrame([{'date': target_date, 'result': np.nan}])
-        data_for_processing = pd.concat([base_df, future_row], ignore_index=True)
-
-        # Panggil process_data yang sudah disatukan logikanya
-        processed_df, _ = self.feature_processor.process_data(data_for_processing)
-
-        # Ambil baris terakhir yang merupakan baris prediksi (kolom digit-nya akan NaN)
-        latest_features_unaligned = processed_df.iloc[-1:]
+        # Menggunakan metode transform_for_prediction yang baru dan aman
+        latest_features = self.feature_processor.transform_for_prediction(base_df, target_date)
         
-        if latest_features_unaligned.empty:
-             raise PredictionError(f"Gagal membuat vektor fitur untuk tanggal {target_date.strftime('%Y-%m-%d')}. Kemungkinan data tidak cukup.")
-        
-        latest_features = latest_features_unaligned.reindex(columns=self.feature_names, fill_value=0)
+        # Memastikan kolom sesuai dengan yang dipelajari model
+        latest_features = latest_features.reindex(columns=self.feature_names, fill_value=0)
         
         predictions = {}
         all_probas_for_eval = {}
