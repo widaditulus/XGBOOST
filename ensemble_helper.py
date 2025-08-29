@@ -30,7 +30,7 @@ def _train_single_model(model_type, X, y_encoded, params, model_path):
 
 def train_ensemble_models(X, y_encoded, model_dir_base, digit):
     """Melatih dan menyimpan model komplementer (RF & LGBM) secara paralel."""
-
+    
     rf_params = ENSEMBLE_CONFIG.get("rf_params", {})
     lgbm_params = ENSEMBLE_CONFIG.get("lgbm_params", {})
 
@@ -54,7 +54,7 @@ def ensemble_predict_proba(models, X):
     Models adalah dict: {'xgb': model1, 'rf': model2, ...}
     """
     all_probas = []
-
+    
     for model_name, model in models.items():
         if model:
             try:

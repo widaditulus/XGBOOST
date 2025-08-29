@@ -1,11 +1,11 @@
 # data_fetcher.py
+
 # -*- coding: utf-8 -*-
 import os
 import pandas as pd
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta # // PERBAIKAN: Menambahkan impor timedelta
 from typing import Optional
-import time
 from io import StringIO
 
 from utils import logger, error_handler
@@ -37,23 +37,26 @@ class DataFetcher:
             df_from_db = get_latest_data(self.pasaran)
             if df_from_db is not None and not df_from_db.empty:
                 logger.info(f"Data untuk {self.pasaran} dimuat dari database lokal. Total: {len(df_from_db)} baris.")
-                # UPDATED: Pastikan kolom result dari DB juga string
                 df_from_db['result'] = df_from_db['result'].astype(str)
+
+                latest_date_in_db = df_from_db['date'].max()
+                # Cek jika data lebih tua dari kemarin (lebih fleksibel untuk pasaran yang tidak buka tiap hari)
+                if latest_date_in_db.date() < (datetime.now() - timedelta(days=1)).date():
+                    logger.warning(f"Data di database lokal ketinggalan (terakhir {latest_date_in_db.date()}). Memaksa ambil dari GitHub.")
+                    return self.fetch_data(force_github=True)
+                
                 return df_from_db
 
-        logger.info(f"Data untuk {self.pasaran} tidak ada di cache lokal, mencoba ambil dari GitHub.")
+        logger.info(f"Mengambil data dari GitHub untuk {self.pasaran}.")
         if not self.github_url:
             raise DataFetchingError(f"URL tidak ditemukan untuk pasaran {self.pasaran}")
 
         try:
             response = requests.get(self.github_url, timeout=15)
             response.raise_for_status()
-
-            # UPDATED: Perubahan Kunci - Memaksa kolom 'result' dibaca sebagai string (str)
-            # Ini mencegah pandas salah menginterpretasikan '0410' sebagai angka 410.
-            # Semua kolom lain akan diinferensikan tipenya secara otomatis.
+            
             df = pd.read_csv(StringIO(response.text), dtype={'result': str, 'nomor': str})
-
+            
             if df.empty: raise DataFetchingError(f"Data kosong dari URL untuk {self.pasaran}")
 
             df.columns = df.columns.str.lower().str.strip()
@@ -67,9 +70,9 @@ class DataFetcher:
             df['date'] = df['date'].apply(self._parse_date)
             df.dropna(subset=['date', 'result'], inplace=True)
             df = df[['date', 'result']].sort_values('date').reset_index(drop=True)
-
+            
             save_data_to_db(self.pasaran, df)
-
+            
             return df
 
         except requests.exceptions.RequestException as e:

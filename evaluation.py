@@ -34,8 +34,8 @@ def calculate_ece(y_true_labels, y_pred_probs_max, y_pred_probs_full, n_bins=10)
             # y_pred_probs_full[in_bin].argmax(axis=1) akan berisi label yang diprediksi
             correct_predictions_in_bin = (y_true_labels[in_bin] == y_pred_probs_full[in_bin].argmax(axis=1))
             accuracy_in_bin = np.mean(correct_predictions_in_bin)
-
+            
             avg_confidence_in_bin = np.mean(y_pred_probs_max[in_bin])
             ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
-
+            
     return ece

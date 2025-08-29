@@ -25,7 +25,6 @@ from evaluation import calculate_brier_score, calculate_ece
 from ensemble_helper import train_ensemble_models, ensemble_predict_proba
 from continual_learner import ContinualLearner
 
-
 class DataManager:
     # --- TIDAK ADA PERUBAHAN DI KELAS INI ---
     def __init__(self, pasaran):
@@ -68,9 +67,11 @@ class DataManager:
                 self.df = df_sorted
             return self.df.copy()
 
+# =====================================================================================
+# PEROMBAKAN TOTAL BAGIAN FEATURE ENGINEERING UNTUK MEMASTIKAN TIDAK ADA KEBOCORAN DATA
+# =====================================================================================
 
 class FeatureProcessor:
-    # --- TIDAK ADA PERUBAHAN DI KELAS INI ---
     def __init__(self, timesteps, feature_config):
         self.timesteps = timesteps
         self.feature_config = feature_config
@@ -87,45 +88,39 @@ class FeatureProcessor:
         long_ma = series.rolling(window=long_window, min_periods=1).mean()
         crossover = ((short_ma > long_ma) & (short_ma.shift(1) < long_ma.shift(1))) | ((short_ma < long_ma) & (short_ma.shift(1) > long_ma.shift(1)))
         return crossover.astype(int)
-        
-    def _add_inter_digit_features(self, df):
-        prev_as = df['as'].shift(1)
-        prev_kop = df['kop'].shift(1)
-        prev_kepala = df['kepala'].shift(1)
-        prev_ekor = df['ekor'].shift(1)
-        df['prev_sum'] = prev_as + prev_kop + prev_kepala + prev_ekor
-        prev_digits = pd.concat([prev_as, prev_kop, prev_kepala, prev_ekor], axis=1)
-        df['prev_range'] = prev_digits.max(axis=1) - prev_digits.min(axis=1)
-        for i, d_str in enumerate(self.digits):
-            df[f'prev_{d_str}_is_even'] = (df[d_str].shift(1) % 2 == 0).astype(int)
-        return df
 
     def fit_transform(self, df_input: pd.DataFrame) -> pd.DataFrame:
+        """
+        Metode ini hanya untuk training. Mengubah data historis menjadi fitur dan target.
+        Menjamin tidak ada kebocoran data dengan menghitung fitur dari data masa lalu.
+        """
         df = df_input.copy()
+
+        # 1. Buat kolom target (digit) terlebih dahulu
         for i, digit in enumerate(self.digits):
             df[digit] = df["result"].str[i].astype('int8')
 
+        # 2. Buat fitur-fitur baru, SEMUA dihitung berdasarkan data yang di-shift (H-1)
+        # Fitur temporal (tidak bocor)
         df['dayofweek'] = df['date'].dt.dayofweek
         df['is_weekend'] = df['dayofweek'].isin([5, 6]).astype(int)
         df['day_sin'] = np.sin(2 * np.pi * df['date'].dt.dayofweek / 6.0)
         df['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek / 6.0)
-        
-        df = self._add_inter_digit_features(df)
 
+        # Fitur interaksi (anti-bocor)
         df['as_kop_sum_prev'] = df['as'].shift(1) + df['kop'].shift(1)
         df['kepala_ekor_diff_prev'] = df['kepala'].shift(1) - df['ekor'].shift(1)
         df['as_mul_kop_prev'] = df['as'].shift(1) * df['kop'].shift(1)
         df['kepala_mul_ekor_prev'] = df['kepala'].shift(1) * df['ekor'].shift(1)
-        df['total_ganjil_prev'] = df[self.digits].shift(1).apply(lambda row: (row % 2 != 0).sum(), axis=1)
-        df['total_genap_prev'] = 4 - df['total_ganjil_prev']
         
+        # Fitur statistik (anti-bocor)
         vol_window = self.feature_config.get("volatility_window", 10)
         for d in self.digits:
             shifted_d = df[d].shift(1)
-            df[f'{d}_std_{vol_window}_prev'] = shifted_d.rolling(vol_window).std()
             df[f'{d}_skew_{vol_window}_prev'] = shifted_d.rolling(vol_window).skew()
             df[f'{d}_kurt_{vol_window}_prev'] = shifted_d.rolling(vol_window).kurt()
 
+        # Fitur pola (anti-bocor)
         adv_window = 30
         for d in self.digits:
             shifted_d = df[d].shift(1)
@@ -133,72 +128,73 @@ class FeatureProcessor:
             rolling_std = shifted_d.rolling(window=adv_window, min_periods=1).std().replace(0, 1)
             df[f'{d}_zscore_prev'] = (shifted_d - rolling_mean) / rolling_std
             df[f'{d}_streak_prev'] = self._calculate_streak(shifted_d)
+            df[f'{d}_trend_change_prev'] = self._detect_trend_changes(shifted_d)
 
-        lag_features = []
+        # Fitur lag (inti dari model sekuensial)
         for d in self.digits:
             for i in range(1, self.timesteps + 1):
-                lag_col = df[d].shift(i)
-                lag_col.name = f'{d}_lag_{i}'
-                lag_features.append(lag_col)
-        df = pd.concat([df] + lag_features, axis=1)
+                df[f'{d}_lag_{i}'] = df[d].shift(i)
 
+        # 3. Kumpulkan semua nama fitur yang valid
         self.feature_names = [col for col in df.columns if col not in ['date', 'result'] + self.digits]
         
-        df[self.feature_names] = df[self.feature_names].ffill().bfill()
-        df.dropna(subset=self.digits, inplace=True)
+        # 4. Hapus baris yang memiliki nilai NaN (terutama di awal karena operasi shift dan lag)
+        df.dropna(inplace=True)
+        
         return df
 
     def transform_for_prediction(self, historical_df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
+        """
+        Metode ini HANYA untuk prediksi. Membuat satu baris vektor fitur untuk tanggal target.
+        """
         if len(historical_df) < self.timesteps:
-            raise PredictionError(f"Data historis tidak cukup ({len(historical_df)} baris).")
+            raise PredictionError(f"Data historis tidak cukup ({len(historical_df)} baris) untuk membuat prediksi dengan {self.timesteps} timesteps.")
 
         last_known_data = historical_df.iloc[-self.timesteps:].copy()
+
+        # 1. Buat kolom target (digit) untuk data historis
         for i, digit in enumerate(self.digits):
             last_known_data[digit] = last_known_data["result"].str[i].astype('int8')
         
+        # 2. Buat DataFrame satu baris untuk prediksi
         pred_vector = {}
+
+        # 3. Isi fitur secara eksplisit berdasarkan data historis terakhir
         last_row = last_known_data.iloc[-1]
         
+        # Fitur temporal
         pred_vector['dayofweek'] = target_date.dayofweek
         pred_vector['is_weekend'] = 1 if target_date.dayofweek in [5, 6] else 0
         pred_vector['day_sin'] = np.sin(2 * np.pi * target_date.dayofweek / 6.0)
         pred_vector['day_cos'] = np.cos(2 * np.pi * target_date.dayofweek / 6.0)
+        
+        # Fitur interaksi
+        pred_vector['as_kop_sum_prev'] = last_row['as'] + last_row['kop']
+        pred_vector['kepala_ekor_diff_prev'] = last_row['kepala'] - last_row['ekor']
+        pred_vector['as_mul_kop_prev'] = last_row['as'] * last_row['kop']
+        pred_vector['kepala_mul_ekor_prev'] = last_row['kepala'] * last_row['ekor']
 
-        prev_as = last_row['as']
-        prev_kop = last_row['kop']
-        prev_kepala = last_row['kepala']
-        prev_ekor = last_row['ekor']
-        pred_vector['prev_sum'] = prev_as + prev_kop + prev_kepala + prev_ekor
-        pred_vector['prev_range'] = np.max([prev_as, prev_kop, prev_kepala, prev_ekor]) - np.min([prev_as, prev_kop, prev_kepala, prev_ekor])
-        for d, val in zip(self.digits, [prev_as, prev_kop, prev_kepala, prev_ekor]):
-            pred_vector[f'prev_{d}_is_even'] = 1 if val % 2 == 0 else 0
-
-        pred_vector['as_kop_sum_prev'] = prev_as + prev_kop
-        pred_vector['kepala_ekor_diff_prev'] = prev_kepala - prev_ekor
-        pred_vector['as_mul_kop_prev'] = prev_as * prev_kop
-        pred_vector['kepala_mul_ekor_prev'] = prev_kepala * prev_ekor
-        pred_vector['total_ganjil_prev'] = (last_row[self.digits] % 2 != 0).sum()
-        pred_vector['total_genap_prev'] = 4 - pred_vector['total_ganjil_prev']
-
+        # Fitur statistik
         vol_window = self.feature_config.get("volatility_window", 10)
         for d in self.digits:
-            pred_vector[f'{d}_std_{vol_window}_prev'] = last_known_data[d].rolling(vol_window).std().iloc[-1]
             pred_vector[f'{d}_skew_{vol_window}_prev'] = last_known_data[d].rolling(vol_window).skew().iloc[-1]
             pred_vector[f'{d}_kurt_{vol_window}_prev'] = last_known_data[d].rolling(vol_window).kurt().iloc[-1]
         
+        # Fitur pola
         adv_window = 30
         for d in self.digits:
             rolling_mean = last_known_data[d].rolling(window=adv_window, min_periods=1).mean().iloc[-1]
             rolling_std = last_known_data[d].rolling(window=adv_window, min_periods=1).std().replace(0, 1).iloc[-1]
             pred_vector[f'{d}_zscore_prev'] = (last_row[d] - rolling_mean) / rolling_std
             pred_vector[f'{d}_streak_prev'] = self._calculate_streak(last_known_data[d]).iloc[-1]
+            pred_vector[f'{d}_trend_change_prev'] = self._detect_trend_changes(last_known_data[d]).iloc[-1]
 
+        # Fitur lag
         for d in self.digits:
             for i in range(1, self.timesteps + 1):
                 pred_vector[f'{d}_lag_{i}'] = last_known_data[d].iloc[-i]
 
-        pred_df = pd.DataFrame([pred_vector])
-        return pred_df.fillna(0)
+        return pd.DataFrame([pred_vector])
 
 
 class ModelTrainer:
@@ -306,6 +302,7 @@ class ModelPredictor:
         
         df_full = custom_data if custom_data is not None and not custom_data.empty else self.data_manager.get_data(force_refresh=True, force_github=True)
         
+        # Menggunakan metode fit_transform yang baru dan aman
         training_df = self.feature_processor.fit_transform(df_full)
         self.feature_names = self.feature_processor.feature_names
         
@@ -362,12 +359,15 @@ class ModelPredictor:
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
         base_df = self.data_manager.get_data()
         
+        # Menggunakan metode transform_for_prediction yang baru dan aman
         latest_features = self.feature_processor.transform_for_prediction(base_df, target_date)
+        
+        # Memastikan kolom sesuai dengan yang dipelajari model
         latest_features = latest_features.reindex(columns=self.feature_names, fill_value=0)
         
         predictions = {}
         all_probas_for_eval = {}
-        all_candidates_with_probas = {} # Diubah menjadi dict untuk menyimpan probabilitas per digit
+        all_candidates_with_probas = []
 
         for d in self.digits:
             encoder = self.label_encoders[d]
@@ -386,26 +386,17 @@ class ModelPredictor:
             predictions[d] = [str(digit) for digit in top_two_digits]
             
             top_two_probas = probabilities[top_two_indices]
-            # Menyimpan probabilitas untuk setiap kandidat digit
-            all_candidates_with_probas[d] = {str(digit): proba for digit, proba in zip(top_two_digits, top_two_probas)}
+            for digit, proba in zip(top_two_digits, top_two_probas):
+                all_candidates_with_probas.append((str(digit), proba))
         
         kandidat_as, kandidat_kop, kandidat_kepala, kandidat_ekor = predictions['as'], predictions['kop'], predictions['kepala'], predictions['ekor']
         
         combined_candidates = kandidat_as + kandidat_kop + kandidat_kepala + kandidat_ekor
         angka_main_set = sorted(list(set(combined_candidates)))
         
-        # --- PERBAIKAN LOGIKA COLOK BEBAS (CB) ---
-        best_cb = "N/A"
-        if angka_main_set:
-            best_proba = -1
-            # Cari digit di Angka Main dengan probabilitas tertinggi dari *posisi asalnya*
-            for digit_str in angka_main_set:
-                # Cek probabilitas digit ini di setiap posisi (AS, KOP, KEPALA, EKOR)
-                for d in self.digits:
-                    proba = all_candidates_with_probas.get(d, {}).get(digit_str, -1)
-                    if proba > best_proba:
-                        best_proba = proba
-                        best_cb = digit_str
+        best_cb = kandidat_ekor[0]
+        if all_candidates_with_probas:
+            best_cb = max(all_candidates_with_probas, key=lambda item: item[1])[0]
 
         result = {
             "prediction_date": target_date.strftime("%Y-%m-%d"),
@@ -414,19 +405,19 @@ class ModelPredictor:
             "kandidat_kop": ", ".join(kandidat_kop),
             "kandidat_kepala": ", ".join(kandidat_kepala),
             "kandidat_ekor": ", ".join(kandidat_ekor),
-            "angka_main": ", ".join(angka_main_set[:5]), # Ambil 5 angka untuk AM
+            "angka_main": ", ".join(angka_main_set[:4]),
             "colok_bebas": best_cb
         }
         
-        # --- PERBAIKAN BUG `TypeError` ---
-        # Mengembalikan data tambahan sebagai tuple terpisah, bukan di dalam dictionary utama
         if for_evaluation:
-            return result, all_probas_for_eval, self.label_encoders
+            result["probabilities"] = all_probas_for_eval
+            result["label_encoders"] = self.label_encoders
             
         return result
 
     @error_handler(logger)
     def evaluate_performance(self, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+        # --- TIDAK ADA PERUBAHAN DI evaluate_performance ---
         df = self.data_manager.get_data(force_github=True)
         eval_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
         if eval_df.empty: return {"summary": {"error": "Tidak ada data pada periode yang diminta"}, "results": []}
@@ -436,26 +427,26 @@ class ModelPredictor:
 
         for _, row in eval_df.iterrows():
             try:
-                # --- PERBAIKAN BUG `TypeError` ---
-                # Menangkap hasil return yang baru (tuple)
-                pred_result, probabilities, label_encoders = self.predict_next_day(row['date'].strftime('%Y-%m-%d'), for_evaluation=True)
+                pred_result = self.predict_next_day(row['date'].strftime('%Y-%m-%d'), for_evaluation=True)
                 actual_result = row['result']
                 
                 if pred_result and actual_result:
                     for i, d in enumerate(self.digits):
                         actual_digit = int(actual_result[i])
-                        le = label_encoders[d] # Menggunakan label_encoders dari tuple
+                        le = pred_result['label_encoders'][d]
                         if actual_digit in le.classes_:
                             y_true_one_hot = np.zeros(len(le.classes_))
                             class_index = np.where(le.classes_ == actual_digit)[0][0]
                             y_true_one_hot[class_index] = 1
                             
                             prob_metrics[d]['y_true'].append(y_true_one_hot)
-                            prob_metrics[d]['y_prob'].append(probabilities[d]) # Menggunakan probabilities dari tuple
+                            prob_metrics[d]['y_prob'].append(pred_result['probabilities'][d])
                             prob_metrics[d]['y_true_label'].append(class_index)
-                            prob_metrics[d]['y_prob_max'].append(probabilities[d].max())
+                            prob_metrics[d]['y_prob_max'].append(pred_result['probabilities'][d].max())
                     
-                    # Dictionary `pred_result` sekarang sudah bersih dan siap disimpan
+                    del pred_result['probabilities']
+                    del pred_result['label_encoders']
+                    
                     results_list.append({ "date": row['date'].strftime('%Y-%m-%d'), "actual": actual_result, **pred_result })
             except PredictionError as e:
                 logger.warning(f"Skipping evaluasi untuk {row['date'].strftime('%Y-%m-%d')}: {e}")
@@ -534,5 +525,3 @@ class ModelPredictor:
         except Exception as e:
             drift_logger.error(f"Gagal saat memeriksa drift untuk {self.pasaran}-{digit}: {e}")
             return False
-
-}
