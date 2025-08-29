@@ -138,14 +138,19 @@ class FeatureProcessor:
             df[f'prev_{d_str}_is_even'] = (df[d_str].shift(1) % 2 == 0).astype(int)
         return df
 
+    # --- PERBAIKAN UTAMA: MENGHAPUS 'is_prediction' DAN MENYATUKAN ALUR LOGIKA ---
     @error_handler(logger)
-    def process_data(self, df_input: pd.DataFrame, is_prediction: bool = False) -> Tuple[pd.DataFrame, List[str]]:
+    def process_data(self, df_input: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         df = df_input.copy()
-        if not is_prediction:
-            df["result_cleaned"] = df["result"]
-            df = df.dropna(subset=["result_cleaned", "date"])
-            for i, digit in enumerate(self.digits):
-                df[digit] = df["result_cleaned"].str[i].astype('int8')
+
+        # Alur sekarang seragam: selalu buat kolom digit.
+        # Untuk baris prediksi (masa depan), 'result' akan NaN, sehingga kolom digit juga akan NaN.
+        df["result_cleaned"] = df["result"]
+        # Hanya proses baris yang memiliki 'result' (data historis)
+        valid_results = df["result_cleaned"].notna()
+        for i, digit in enumerate(self.digits):
+            # Menggunakan .loc untuk memastikan operasi hanya pada baris yang valid
+            df.loc[valid_results, digit] = df.loc[valid_results, "result_cleaned"].str[i].astype('int8')
 
         df = self._add_inter_digit_features(df)
         if self.feature_config.get("add_cyclical_features", True):
@@ -156,16 +161,16 @@ class FeatureProcessor:
         df = self._add_temporal_features(df)
         if self.feature_config.get("add_interaction_features", True): df = self._add_interaction_and_stat_features(df)
         
-        # Lag features tetap dihitung seperti biasa, karena ini adalah fitur historis yang valid.
         lags = list(range(1, self.timesteps + 1))
         lag_cols = [df[d].shift(i).rename(f"{d}_lag_{i}") for i in lags for d in self.digits]
-        df = pd.concat([df] + lag_cols, axis=1)
-        
-        df.dropna(inplace=True)
-        df_final = df.reset_index(drop=True)
+        df_final = pd.concat([df] + lag_cols, axis=1)
         
         feature_cols_to_drop = ['date', 'result', 'result_cleaned'] + self.digits
         final_features = [col for col in df_final.columns if col not in feature_cols_to_drop]
+        
+        # Mengisi nilai NaN yang mungkin muncul di awal data dengan 0.
+        # RandomForest tidak bisa menangani NaN.
+        df_final[final_features] = df_final[final_features].fillna(0)
         
         return df_final, final_features
 
@@ -268,7 +273,6 @@ class ModelPredictor:
 
     @error_handler(logger)
     def train_model(self, training_mode: str = 'OPTIMIZED', use_recency_bias: bool = True, custom_data: Optional[pd.DataFrame] = None) -> bool:
-        # --- TIDAK ADA PERUBAHAN SIGNIFIKAN DI train_model, HANYA PEMANGGILAN process_data ---
         logger.info(f"Memulai training untuk {self.pasaran} mode {training_mode}. Recency Bias: {use_recency_bias}")
         self.config["training_params"] = TRAINING_CONFIG_OPTIONS.get(training_mode, TRAINING_CONFIG_OPTIONS['OPTIMIZED'])
         model_trainer = ModelTrainer(self.digits, self.config["training_params"])
@@ -281,11 +285,16 @@ class ModelPredictor:
             logger.info("Mengambil data penuh dari data manager untuk training.")
             df_full = self.data_manager.get_data(force_refresh=True, force_github=True)
 
-        # Memanggil process_data dengan flag is_prediction=False (default)
+        # Memanggil process_data yang sudah disatukan logikanya
         processed_df, features = self.feature_processor.process_data(df_full)
+        
+        # --- PERBAIKAN LOGIKA: Membersihkan data training SETELAH pembuatan fitur ---
+        # DataFrame untuk training hanya berisi baris di mana target (digit) tidak kosong
+        training_df = processed_df.dropna(subset=self.digits).copy()
+        
         min_samples = self.config["strategy"]["min_training_samples"]
-        if len(processed_df) < min_samples:
-            raise TrainingError(f"Data tidak cukup. Perlu {min_samples}, tersedia {len(processed_df)}.")
+        if len(training_df) < min_samples:
+            raise TrainingError(f"Data tidak cukup untuk training setelah diproses. Perlu {min_samples}, tersedia {len(training_df)}.")
         
         self.feature_names = features
         joblib.dump(self.feature_names, os.path.join(self.model_dir_base, "features.pkl"))
@@ -293,24 +302,21 @@ class ModelPredictor:
 
         sample_weights = None
         if use_recency_bias and ADAPTIVE_LEARNING_CONFIG["USE_RECENCY_WEIGHTING"]:
-            logger.info("Menerapkan Recency Bias (Exponential Decay) pada data training.")
+            days_since_latest = (training_df['date'].max() - training_df['date']).dt.days
             half_life = ADAPTIVE_LEARNING_CONFIG["RECENCY_HALF_LIFE_DAYS"]
             decay_rate = np.log(2) / half_life
-            days_since_latest = (processed_df['date'].max() - processed_df['date']).dt.days
             weights = np.exp(-decay_rate * days_since_latest)
-            weights /= np.max(weights)
-            sample_weights = pd.Series(weights, index=processed_df.index)
-            logger.info(f"Bobot exponential diterapkan. Bobot min: {sample_weights.min():.4f}, max: {sample_weights.max():.4f}")
-
+            sample_weights = pd.Series(weights, index=training_df.index)
+        
         for digit in self.digits:
-            y_full = processed_df[digit]
+            y_full = training_df[digit]
             if y_full.nunique() < 2:
                 logger.warning(f"Skipping '{digit}', hanya 1 nilai unik.")
                 continue
             
             existing_model = self.models.get(digit) if self.models_ready else None
             model, le, importance, y_encoded = model_trainer.train_digit_model(
-                processed_df[self.feature_names], 
+                training_df[self.feature_names], 
                 y_full, 
                 digit, 
                 existing_model=existing_model,
@@ -324,7 +330,7 @@ class ModelPredictor:
                 
                 if ENSEMBLE_CONFIG.get("USE_ENSEMBLE"):
                     train_ensemble_models(
-                        X=processed_df[self.feature_names],
+                        X=training_df[self.feature_names],
                         y_encoded=y_encoded,
                         model_dir_base=self.model_dir_base,
                         digit=digit
@@ -343,24 +349,20 @@ class ModelPredictor:
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
         base_df = self.data_manager.get_data()
         
-        # Buat DataFrame baru yang menyertakan tanggal target untuk pembuatan fitur.
         future_row = pd.DataFrame([{'date': target_date, 'result': np.nan}])
         data_for_processing = pd.concat([base_df, future_row], ignore_index=True)
 
-        # Proses data dengan flag is_prediction=True agar kolom 'result' tidak di-decode.
-        processed_df, _ = self.feature_processor.process_data(data_for_processing, is_prediction=True)
+        # Panggil process_data yang sudah disatukan logikanya
+        processed_df, _ = self.feature_processor.process_data(data_for_processing)
 
-        if processed_df.empty:
-            raise PredictionError("Tidak ada data yang tersisa setelah rekayasa fitur untuk prediksi.")
-            
-        # Ambil baris terakhir yang sesuai dengan tanggal target.
-        latest_features_unaligned = processed_df[processed_df['date'].dt.date == target_date.date()]
+        # Ambil baris terakhir yang merupakan baris prediksi (kolom digit-nya akan NaN)
+        latest_features_unaligned = processed_df.iloc[-1:]
+        
         if latest_features_unaligned.empty:
-            raise PredictionError(f"Gagal membuat vektor fitur untuk tanggal {target_date.strftime('%Y-%m-%d')}.")
+             raise PredictionError(f"Gagal membuat vektor fitur untuk tanggal {target_date.strftime('%Y-%m-%d')}. Kemungkinan data tidak cukup.")
         
-        latest_features = latest_features_unaligned.iloc[-1:].reindex(columns=self.feature_names, fill_value=0)
+        latest_features = latest_features_unaligned.reindex(columns=self.feature_names, fill_value=0)
         
-        # ... (Sisa logika prediksi tidak berubah)
         predictions = {}
         all_probas_for_eval = {}
         all_candidates_with_probas = []
