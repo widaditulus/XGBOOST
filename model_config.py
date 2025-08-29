@@ -1,4 +1,5 @@
 # model_config.py
+
 # -*- coding: utf-8 -*-
 
 # --- PARAMETER UNTUK CONSTRUCTOR XGBOOST ---
@@ -51,6 +52,7 @@ TRAINING_CONFIG_OPTIONS = {
     'QUICK': {"xgb_params": XGB_PARAMS_CEPAT},
     'COMPREHENSIVE': {"xgb_params": XGB_PARAMS_AKURAT},
     'OPTIMIZED': {"xgb_params": XGB_PARAMS_OPTIMIZED},
-    # UPDATED: Menambahkan mode training baru
-    'DEEP_ANALYSIS': {"xgb_params": XGB_PARAMS_DEEP_ANALYSIS}
+    'DEEP_ANALYSIS': {"xgb_params": XGB_PARAMS_DEEP_ANALYSIS},
+    # Menambahkan mode baru sebagai alias dari DEEP_ANALYSIS
+    'EXPERT_TUNING': {"xgb_params": XGB_PARAMS_DEEP_ANALYSIS}
 }
