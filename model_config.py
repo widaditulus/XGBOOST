@@ -27,21 +27,21 @@ XGB_PARAMS_CEPAT = {
 # UPDATED: Menambahkan set parameter baru untuk analisis yang lebih mendalam
 # PERBAIKAN: Parameter untuk kepala & ekor diubah untuk menangani kasus sulit
 XGB_PARAMS_DEEP_ANALYSIS = {
-    "as":     {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 2000, "learning_rate": 0.01, "max_depth": 7, "subsample": 0.7, "colsample_bytree": 0.7, "gamma": 0.2, "reg_alpha": 0.1, "random_state": 42, "early_stopping_rounds": 50},
-    "kop":    {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 2000, "learning_rate": 0.01, "max_depth": 7, "subsample": 0.7, "colsample_bytree": 0.7, "gamma": 0.2, "reg_alpha": 0.1, "random_state": 42, "early_stopping_rounds": 50},
+    "as":     {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 2000, "learning_rate": 0.03, "max_depth": 7, "subsample": 0.6, "colsample_bytree": 0.6, "gamma": 0.2, "reg_alpha": 0.2, "random_state": 42, "early_stopping_rounds": 50},
+    "kop":    {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 2000, "learning_rate": 0.03, "max_depth": 7, "subsample": 0.6, "colsample_bytree": 0.6, "gamma": 0.2, "reg_alpha": 0.2, "random_state": 42, "early_stopping_rounds": 50},
     "kepala": {"objective": "multi:softprob", "eval_metric": "mlogloss",
                "n_estimators": 2500,      # Beri lebih banyak kesempatan belajar
-               "learning_rate": 0.008,   # Langkah belajar lebih kecil/hati-hati
-               "max_depth": 8,           # Izinkan model melihat interaksi fitur yang lebih kompleks
-               "subsample": 0.65, "colsample_bytree": 0.65, "gamma": 0.25,
-               "reg_alpha": 0.15, "random_state": 42,
+               "learning_rate": 0.03,   # Langkah belajar lebih kecil/hati-hati
+               "max_depth": 7,           # Izinkan model melihat interaksi fitur yang lebih kompleks
+               "subsample": 0.6, "colsample_bytree": 0.6, "gamma": 0.2,
+               "reg_alpha": 0.2, "random_state": 42,
                "early_stopping_rounds": 60}, # Perpanjang kesabaran
     "ekor":   {"objective": "multi:softprob", "eval_metric": "mlogloss",
                "n_estimators": 2500,      # Beri lebih banyak kesempatan belajar
-               "learning_rate": 0.008,   # Langkah belajar lebih kecil/hati-hati
-               "max_depth": 8,           # Izinkan model melihat interaksi fitur yang lebih kompleks
-               "subsample": 0.65, "colsample_bytree": 0.65, "gamma": 0.25,
-               "reg_alpha": 0.15, "random_state": 42,
+               "learning_rate": 0.03,   # Langkah belajar lebih kecil/hati-hati
+               "max_depth": 7,           # Izinkan model melihat interaksi fitur yang lebih kompleks
+               "subsample": 0.6, "colsample_bytree": 0.6, "gamma": 0.2,
+               "reg_alpha": 0.2, "random_state": 42,
                "early_stopping_rounds": 60} # Perpanjang kesabaran
 }
 

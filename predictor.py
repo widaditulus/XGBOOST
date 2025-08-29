@@ -16,7 +16,7 @@ from sklearn.ensemble import RandomForestClassifier
 import lightgbm as lgb
 
 from constants import (MODELS_DIR, MARKET_CONFIGS, DRIFT_THRESHOLD,
-                     ACCURACY_THRESHOLD_FOR_RETRAIN, ADAPTIVE_LEARNING_CONFIG, ENSEMBLE_CONFIG, FILTER_CONFIG)
+                     ACCURACY_THRESHOLD_FOR_RETRAIN, ADAPTIVE_LEARNING_CONFIG, ENSEMBLE_CONFIG, FILTER_CONFIG, TRAINING_PENALTY_CONFIG)
 from utils import logger, error_handler, drift_logger
 from model_config import TRAINING_CONFIG_OPTIONS
 from exceptions import TrainingError, PredictionError, DataFetchingError
@@ -203,7 +203,6 @@ class FeatureProcessor:
 
 
 class ModelTrainer:
-    # --- TIDAK ADA PERUBAHAN DI KELAS INI ---
     def __init__(self, digits, training_params):
         self.digits = digits
         self.training_params = training_params
@@ -218,6 +217,28 @@ class ModelTrainer:
                 logger.warning(f"Hanya ada satu kelas unik untuk digit {digit}. Skipping training.")
                 return None, None, None, None
             X_train = X_full[feature_subset] if feature_subset else X_full
+            
+            # --- Perbaikan utama: Mengganti bobot statis dengan bobot dinamis berbasis inverse probability ---
+            # UPDATED: Bobot sampel dinamis untuk pelatihan
+            if TRAINING_PENALTY_CONFIG["ENABLED"]:
+                # Menghitung bobot kebalikan frekuensi
+                class_counts = y_full.value_counts()
+                total_samples = len(y_full)
+                # Menghindari pembagian dengan nol untuk kelas yang tidak ada
+                class_weights = total_samples / (len(le.classes_) * class_counts.reindex(le.classes_, fill_value=0.001))
+                
+                # Menormalisasi bobot agar jumlahnya konstan
+                class_weights = class_weights / class_weights.sum() * len(le.classes_)
+                
+                # Mengubah bobot kelas menjadi bobot sampel
+                dynamic_weights = pd.Series([class_weights.get(c, 1.0) for c in y_full], index=y_full.index)
+                
+                if sample_weights is not None:
+                    # Menggabungkan bobot recency bias dan bobot dinamis baru
+                    sample_weights = sample_weights * dynamic_weights
+                else:
+                    sample_weights = dynamic_weights
+
             model = xgb.XGBClassifier(**xgb_params)
 
             logger.info(f"Training model untuk {digit}. Warm-start: {'YES' if existing_model else 'NO'}.")
@@ -356,7 +377,7 @@ class ModelPredictor:
         self.models_ready = self.load_models()
         return self.models_ready
 
-    @error_handler(logger)
+    @error_handler(drift_logger)
     def predict_next_day(self, target_date_str: Optional[str] = None, for_evaluation: bool = False) -> Dict[str, Any]:
         if not self.models_ready:
             raise PredictionError("Model tidak siap. Silakan jalankan training.")
