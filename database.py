@@ -46,7 +46,7 @@ def get_latest_data(pasaran: str, limit: Optional[int] = None) -> Optional[pd.Da
             query = f"SELECT date, result FROM {table_name} ORDER BY date ASC"
             if limit:
                 query += f" LIMIT {limit}"
-            
+
             df = pd.read_sql_query(query, conn)
             df['date'] = pd.to_datetime(df['date'])
             return df
@@ -61,7 +61,7 @@ def save_data_to_db(pasaran: str, df: pd.DataFrame):
     if df.empty:
         logger.warning(f"Tidak ada data untuk disimpan ke DB untuk pasaran: {pasaran}")
         return
-    
+
     with create_connection() as conn:
         table_name = f"data_{pasaran}"
         df_to_save = df.copy()
