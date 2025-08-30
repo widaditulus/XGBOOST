@@ -1,8 +1,9 @@
-# app.py
+# app.py (Final - Lengkap dan Fungsional)
 
 # -*- coding: utf-8 -*-
 import os
 import traceback
+import json
 from flask import Flask, request, jsonify, render_template, abort
 from datetime import datetime
 import threading
@@ -14,6 +15,7 @@ from utils import check_dependencies, logger
 from constants import PASARAN_LIST, PASARAN_DISPLAY_MAPPING, LOGS_DIR, MODELS_DIR
 from exceptions import TrainingError, PredictionError, DataFetchingError
 from model_config import TRAINING_CONFIG_OPTIONS
+from tuner import HyperparameterTuner
 
 app = Flask(__name__, template_folder='.', static_folder='.', static_url_path='')
 
@@ -26,6 +28,8 @@ evaluation_status = {}
 evaluation_lock = threading.Lock()
 update_status = {}
 update_lock = threading.Lock()
+tuning_status = {}
+tuning_lock = threading.Lock()
 
 
 @app.errorhandler(Exception)
@@ -66,8 +70,9 @@ def start_training(pasaran):
     training_mode = request.form.get('training_mode', 'OPTIMIZED')
     use_recency_bias = request.form.get('use_recency_bias') == 'true'
 
-    if training_mode not in TRAINING_CONFIG_OPTIONS:
+    if training_mode != 'AUTO' and training_mode not in TRAINING_CONFIG_OPTIONS:
         abort(400, description=f"Mode training '{training_mode}' tidak valid.")
+        
     with training_lock:
         if training_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Training untuk {pasaran.upper()} sudah berjalan."}), 409
@@ -80,7 +85,6 @@ def start_training(pasaran):
     return jsonify({"status": "success", "message": f"Proses training untuk {pasaran.upper()} telah dimulai."})
 
 def run_training_in_background(pasaran: str, training_mode: str, use_recency_bias: bool):
-    """Fungsi worker yang menjalankan training di thread terpisah."""
     try:
         logger.info(f"Memulai thread training untuk pasaran: {pasaran} dengan mode: {training_mode}")
         predictor_to_train = get_predictor(pasaran)
@@ -105,35 +109,51 @@ def get_training_status(pasaran):
         status = training_status.get(pasaran, 'idle')
         message = training_status.get(f"{pasaran}_message", "")
     return jsonify({"status": status, "message": message})
-
-@app.route('/trigger-continual-learning', methods=['POST'])
+    
+# --- RUTE API UNTUK HYPERPARAMETER TUNING ---
+@app.route('/start-tuning', methods=['POST'])
 @validate_pasaran
-def trigger_continual_learning(pasaran):
-    logger.info(f"Menerima permintaan manual trigger untuk continual learning pasaran {pasaran}.")
-    with training_lock:
-        if training_status.get(pasaran) == 'running':
-            return jsonify({"status": "error", "message": f"Proses lain sedang berjalan untuk {pasaran.upper()}."}), 409
-        training_status[pasaran] = 'running'
-        training_status[f"{pasaran}_message"] = "Proses incremental retraining manual dimulai..."
+def start_tuning(pasaran):
+    with tuning_lock:
+        if tuning_status.get(pasaran) == 'running':
+            return jsonify({"status": "error", "message": f"Optimasi untuk {pasaran.upper()} sudah berjalan."}), 409
+        tuning_status[pasaran] = 'running'
+        tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter..."
 
-    thread = threading.Thread(target=run_incremental_retrain_in_background, args=(pasaran,))
+    thread = threading.Thread(target=run_tuning_in_background, args=(pasaran,))
     thread.daemon = True
     thread.start()
-    return jsonify({"status": "success", "message": "Proses incremental retraining telah dimulai."})
+    return jsonify({"status": "success", "message": f"Optimasi parameter untuk {pasaran.upper()} telah dimulai."})
 
-def run_incremental_retrain_in_background(pasaran: str):
+def run_tuning_in_background(pasaran: str):
+    digits = ["as", "kop", "kepala", "ekor"]
     try:
-        predictor = get_predictor(pasaran)
-        success = predictor.continual_learner.trigger_incremental_retrain()
-        with training_lock:
-            training_status[pasaran] = "completed" if success else "failed"
-            training_status[f"{pasaran}_message"] = f"Incremental retraining {'selesai' if success else 'gagal'}."
-    except Exception as e:
-        logger.error(f"Exception di thread incremental retrain untuk {pasaran}: {e}", exc_info=True)
-        with training_lock:
-            training_status[pasaran] = "failed"
-            training_status[f"{pasaran}_message"] = f"Error: {str(e)}"
+        for digit in digits:
+            with tuning_lock:
+                tuning_status[f"{pasaran}_message"] = f"Mengoptimasi parameter untuk digit: {digit.upper()}..."
 
+            tuner = HyperparameterTuner(pasaran, digit)
+            tuner.run_tuning()
+
+        with tuning_lock:
+            tuning_status[pasaran] = "completed"
+            tuning_status[f"{pasaran}_message"] = f"Optimasi untuk {pasaran.upper()} berhasil. Parameter terbaik telah disimpan."
+
+    except Exception as e:
+        with tuning_lock:
+            tuning_status[pasaran] = "failed"
+            tuning_status[f"{pasaran}_message"] = f"Error saat optimasi: {str(e)}"
+        logger.error(f"Exception di thread tuning untuk {pasaran}: {e}", exc_info=True)
+
+@app.route('/tuning-status', methods=['GET'])
+@validate_pasaran
+def get_tuning_status(pasaran):
+    with tuning_lock:
+        status = tuning_status.get(pasaran, 'idle')
+        message = tuning_status.get(f"{pasaran}_message", "")
+    return jsonify({"status": status, "message": message})
+
+# --- RUTE API UNTUK EVALUASI ---
 @app.route('/start-evaluation', methods=['POST'])
 @validate_pasaran
 def start_evaluation(pasaran):
@@ -180,6 +200,7 @@ def get_evaluation_status(pasaran):
         data = evaluation_status.get(f"{pasaran}_data", {})
     return jsonify({"status": status, "data": data})
 
+# --- RUTE API UNTUK UPDATE DATA ---
 @app.route('/update-data', methods=['POST'])
 @validate_pasaran
 def update_data(pasaran):
@@ -216,6 +237,7 @@ def get_update_status(pasaran):
         message = update_status.get(f"{pasaran}_message", "")
     return jsonify({"status": status, "message": message})
 
+# --- RUTE API UNTUK PREDIKSI ---
 @app.route('/predict', methods=['POST'])
 @validate_pasaran
 def predict(pasaran):
@@ -227,6 +249,7 @@ def predict(pasaran):
     except (PredictionError, DataFetchingError) as e:
         return jsonify({"error": "Gagal membuat prediksi", "details": str(e)}), 400
 
+# --- RUTE API UNTUK KESEHATAN MODEL ---
 @app.route('/feature-importance/<pasaran>')
 @validate_pasaran
 def get_feature_importance(pasaran):
@@ -249,7 +272,6 @@ def get_drift_log():
         lines = f.readlines()
     return jsonify(lines[-50:])
 
-# // UPDATED: Menambahkan kembali endpoint debugging
 @app.route('/debug/model-status/<pasaran>')
 @validate_pasaran
 def debug_model_status(pasaran):

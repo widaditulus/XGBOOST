@@ -1,8 +1,11 @@
+// script.js (Final - Lengkap dan Fungsional)
+
 document.addEventListener('DOMContentLoaded', function() {
     let currentPasaran = document.getElementById('pasaranSelect').value;
     let trainingInterval = null;
     let evaluationInterval = null;
     let updateInterval = null; 
+    let tuningInterval = null;
     const charts = {};
 
     const ui = {
@@ -10,7 +13,6 @@ document.addEventListener('DOMContentLoaded', function() {
         trainingMode: document.getElementById('trainingMode'),
         startTrainingBtn: document.getElementById('startTrainingBtn'),
         updateDataBtn: document.getElementById('updateDataBtn'),
-        // UPDATED: Menambahkan checkbox ke UI object
         recencyBiasCheck: document.getElementById('recencyBiasCheck'),
         dataInfo: document.getElementById('dataInfo'),
         predictBtn: document.getElementById('predictBtn'),
@@ -28,6 +30,9 @@ document.addEventListener('DOMContentLoaded', function() {
         systemActivityStatus: document.getElementById('systemActivityStatus'),
         trainingProgress: document.querySelector('.progress'),
         trainingProgressBar: document.getElementById('trainingProgressBar'),
+        startTuningBtn: document.getElementById('startTuningBtn'),
+        tuningActivityStatus: document.getElementById('tuningActivityStatus'),
+        
         healthTab: document.getElementById('health-tab'),
         evaluationTab: document.getElementById('evaluation-tab'),
         evalStartDate: document.getElementById('evalStartDate'),
@@ -116,23 +121,19 @@ document.addEventListener('DOMContentLoaded', function() {
                 ui.angkaMain.textContent = data.angka_main;
                 ui.colokBebas.textContent = data.colok_bebas;
                 ui.predictionDisplay.style.display = 'block';
-                showAlert('Prediksi berhasil dibuat dengan data terbaru.', 'success');
-            } else {
-                ui.predictionDisplay.style.display = 'none';
-                showAlert('Tidak dapat membuat prediksi', 'warning');
             }
         }).finally(() => {
             btn.disabled = false;
             btn.innerHTML = originalText;
         });
     }
-    
+
     function startUpdateData() {
         const btn = ui.updateDataBtn;
         btn.dataset.originalText = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Mengupdate...`;
-        ui.systemActivityStatus.textContent = 'Memulai sinkronisasi data...';
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+        ui.systemActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Memulai sinkronisasi data...`;
         const formData = new FormData();
         formData.append('pasaran', currentPasaran);
         fetchData('/update-data', { method: 'POST', body: formData }).then(data => {
@@ -142,29 +143,27 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 btn.disabled = false;
                 btn.innerHTML = btn.dataset.originalText;
-                ui.systemActivityStatus.textContent = 'Gagal memulai update data.';
+                ui.systemActivityStatus.textContent = 'Gagal memulai update.';
             }
         });
     }
 
     function monitorUpdateStatus() {
         if (updateInterval) clearInterval(updateInterval);
-        ui.trainingProgress.style.display = 'none';
-        ui.systemActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Sinkronisasi data sedang berjalan...`;
+        ui.systemActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Sinkronisasi data...`;
         updateInterval = setInterval(() => {
             fetchData(`/update-status?pasaran=${currentPasaran}`).then(data => {
                 if (!data) { clearInterval(updateInterval); return; }
                 if (data.status === 'completed' || data.status === 'failed') {
                     clearInterval(updateInterval);
                     ui.updateDataBtn.disabled = false;
-                    ui.updateDataBtn.innerHTML = ui.updateDataBtn.dataset.originalText;
+                    ui.updateDataBtn.innerHTML = ui.updateDataBtn.dataset.originalText || '<i class="fas fa-sync-alt"></i> Update Data';
                     if (data.status === 'completed') {
                        ui.systemActivityStatus.innerHTML = `<i class="fas fa-check-circle me-2"></i>${data.message}`;
                        showAlert('Sinkronisasi data selesai!', 'success');
                        updateSystemStatus();
                     } else {
                        ui.systemActivityStatus.innerHTML = `<i class="fas fa-exclamation-triangle me-2"></i>Error: ${data.message}`;
-                       showAlert('Sinkronisasi data gagal!', 'danger');
                     }
                 }
             });
@@ -175,13 +174,12 @@ document.addEventListener('DOMContentLoaded', function() {
         const btn = ui.startTrainingBtn;
         btn.dataset.originalText = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Melatih...`;
-        ui.systemActivityStatus.textContent = 'Memulai proses training...';
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+        ui.systemActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Memulai proses training...`;
         
         const formData = new FormData();
         formData.append('pasaran', currentPasaran);
         formData.append('training_mode', ui.trainingMode.value);
-        // UPDATED: Mengirim status checkbox
         formData.append('use_recency_bias', ui.recencyBiasCheck.checked);
         
         fetchData('/start-training', { method: 'POST', body: formData }).then(data => {
@@ -212,7 +210,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     clearInterval(trainingInterval);
                     ui.trainingProgressBar.style.width = '100%';
                     ui.startTrainingBtn.disabled = false;
-                    ui.startTrainingBtn.innerHTML = ui.startTrainingBtn.dataset.originalText;
+                    ui.startTrainingBtn.innerHTML = ui.startTrainingBtn.dataset.originalText || '<i class="fas fa-play"></i> Training';
                     if (data.status === 'completed') {
                         ui.trainingProgressBar.classList.add('bg-success');
                         ui.systemActivityStatus.innerHTML = `<i class="fas fa-check-circle me-2"></i>${data.message}`;
@@ -221,35 +219,91 @@ document.addEventListener('DOMContentLoaded', function() {
                     } else {
                         ui.trainingProgressBar.classList.add('bg-danger');
                         ui.systemActivityStatus.innerHTML = `<i class="fas fa-exclamation-triangle me-2"></i>Error: ${data.message}`;
-                        showAlert('Training gagal!', 'danger');
                     }
                 }
             });
         }, 2000);
     }
     
+    function startTuning() {
+        if (!confirm("Proses optimasi akan memakan waktu lama (bisa lebih dari 1 jam) dan akan sangat membebani CPU. Lanjutkan?")) {
+            return;
+        }
+        const btn = ui.startTuningBtn;
+        btn.dataset.originalText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
+        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Memulai proses optimasi...`;
+        
+        const formData = new FormData();
+        formData.append('pasaran', currentPasaran);
+        
+        fetchData('/start-tuning', { method: 'POST', body: formData }).then(data => {
+            if (data?.status === 'success') {
+                showAlert(data.message, 'info');
+                monitorTuningStatus();
+            } else {
+                btn.disabled = false;
+                btn.innerHTML = btn.dataset.originalText;
+                ui.tuningActivityStatus.textContent = 'Gagal memulai optimasi';
+                showAlert(data?.message || 'Gagal memulai optimasi', 'danger');
+            }
+        });
+    }
+
+    function monitorTuningStatus() {
+        if (tuningInterval) clearInterval(tuningInterval);
+        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Optimasi sedang berjalan...`;
+        tuningInterval = setInterval(() => {
+            fetchData(`/tuning-status?pasaran=${currentPasaran}`).then(data => {
+                if (!data) { clearInterval(tuningInterval); return; }
+                
+                ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>${data.message}`;
+
+                if (data.status === 'completed' || data.status === 'failed') {
+                    clearInterval(tuningInterval);
+                    ui.startTuningBtn.disabled = false;
+                    ui.startTuningBtn.innerHTML = ui.startTuningBtn.dataset.originalText || '<i class="fas fa-magic"></i> Optimasi';
+
+                    if (data.status === 'completed') {
+                        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-check-circle me-2 text-success"></i>${data.message}`;
+                        showAlert('Optimasi parameter selesai!', 'success');
+                        const autoOption = ui.trainingMode.querySelector('option[value="AUTO"]');
+                        if(autoOption) {
+                            autoOption.disabled = false;
+                            ui.trainingMode.value = "AUTO";
+                            showAlert('Mode training "Gunakan Hasil Optimasi" sekarang tersedia.', 'info');
+                        }
+                    } else {
+                        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-exclamation-triangle me-2 text-danger"></i>Error: ${data.message}`;
+                        showAlert('Optimasi parameter gagal!', 'danger');
+                    }
+                }
+            });
+        }, 5000);
+    }
+
+    // --- FUNGSI UNTUK EVALUASI & KESEHATAN MODEL ---
+
     function startEvaluation() {
         if (!ui.evalStartDate.value || !ui.evalEndDate.value) {
             showAlert('Silakan pilih tanggal mulai dan tanggal akhir.', 'warning');
             return;
         }
-        if (new Date(ui.evalStartDate.value) > new Date(ui.evalEndDate.value)) {
-            showAlert('Tanggal mulai tidak boleh setelah tanggal akhir.', 'warning');
-            return;
-        }
         const btn = ui.startEvaluationBtn;
         btn.disabled = true;
-        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Mengevaluasi...`;
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
         updateActivePasaranDisplay();
         ui.evaluationResultArea.style.display = 'block';
         ui.evaluationStatus.innerHTML = `<div class="spinner-border text-info" role="status"></div><p class="mt-2">Menjalankan evaluasi...</p>`;
         ui.evaluationDetailTableBody.innerHTML = '';
         ui.evaluationSummaryCards.style.display = 'none';
-        ui.retrainingRecommendation.style.display = 'none';
+        
         const formData = new FormData();
         formData.append('pasaran', currentPasaran);
         formData.append('start_date', ui.evalStartDate.value);
         formData.append('end_date', ui.evalEndDate.value);
+
         fetchData('/start-evaluation', { method: 'POST', body: formData }).then(data => {
             if (data?.status === 'success') {
                 showAlert(data.message, 'info');
@@ -261,19 +315,8 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     }
-
-    function validateEvaluationData(data) {
-        if (!data || !data.data) return false;
-        const { summary, results } = data.data;
-        if (summary && summary.error) { console.warn('Evaluation summary contains error:', summary.error); return true; }
-        if (results && Array.isArray(results)) {
-            results.forEach((result, index) => {
-                if (!result.kandidat_as || !result.kandidat_kop) { console.warn(`Missing data in result ${index}:`, result); }
-            });
-        }
-        return true;
-    }
     
+    // --- UPDATED: FUNGSI-FUNGSI HIGHLIGHT DIKEMBALIKAN ---
     const highlightDigitsWithCorrectCommas = (predictions_str, actual_digit) => {
         if (!predictions_str) return '<span>-</span>';
         const digits = predictions_str.split(', ');
@@ -300,102 +343,98 @@ document.addEventListener('DOMContentLoaded', function() {
                     clearInterval(evaluationInterval);
                     ui.startEvaluationBtn.disabled = false;
                     ui.startEvaluationBtn.innerHTML = `<i class="fas fa-play-circle me-2"></i>Mulai Evaluasi`;
-                    if (!validateEvaluationData(data)) {
-                        ui.evaluationStatus.innerHTML = `<span class="badge bg-warning">Data Tidak Valid</span><p class="text-warning small mt-2">Data evaluasi tidak dalam format yang diharapkan</p>`;
-                        return;
-                    }
-                    ui.evaluationStatus.innerHTML = `<span class="badge bg-success">Evaluasi Selesai</span>`;
+                    ui.evaluationStatus.innerHTML = `<span class="badge bg-success">Selesai</span>`;
+                    
                     const summary = data.data.summary;
                     const results = data.data.results;
+                    
                     if (summary && !summary.error) {
                         ui.evaluationSummaryCards.style.display = 'flex';
-                        document.getElementById('evalTotalDays').textContent = summary.total_days_evaluated;
-                        document.getElementById('evalAsAccuracy').textContent = `${(summary.as_accuracy * 100).toFixed(1)}%`;
-                        document.getElementById('evalKopAccuracy').textContent = `${(summary.kop_accuracy * 100).toFixed(1)}%`;
-                        document.getElementById('evalKepalaAccuracy').textContent = `${(summary.kepala_accuracy * 100).toFixed(1)}%`;
-                        document.getElementById('evalEkorAccuracy').textContent = `${(summary.ekor_accuracy * 100).toFixed(1)}%`;
-                        document.getElementById('evalAmAccuracy').textContent = `${(summary.am_accuracy * 100).toFixed(1)}%`;
-                        document.getElementById('evalCbAccuracy').textContent = `${(summary.cb_accuracy * 100).toFixed(1)}%`;
-                        if (summary.retraining_recommended) {
-                            ui.retrainingRecommendation.textContent = `Rekomendasi: ${summary.retraining_reason}`;
-                            ui.retrainingRecommendation.style.display = 'block';
-                        } else {
-                            ui.retrainingRecommendation.style.display = 'none';
-                        }
-                    } else if (summary && summary.error) {
-                        ui.evaluationStatus.innerHTML += `<p class="text-danger mt-2">${summary.error}</p>`;
+                        ui.evalTotalDays.textContent = summary.total_days_evaluated;
+                        ['as', 'kop', 'kepala', 'ekor', 'am', 'cb'].forEach(key => {
+                            const elem = document.getElementById(`eval${key.charAt(0).toUpperCase() + key.slice(1)}Accuracy`);
+                            if(elem) elem.textContent = `${(summary[`${key}_accuracy`] * 100).toFixed(1)}%`;
+                        });
                     }
+                    
                     if (results && results.length > 0) {
+                        // --- UPDATED: Panggil fungsi highlight saat membangun tabel ---
                         let tableContent = '';
                         results.forEach(res => {
                             const actual = res.actual || '----';
-                            tableContent += `<tr><td>${res.date}</td><td>${actual}</td><td>${highlightDigitsWithCorrectCommas(res.kandidat_as, actual[0])}</td><td>${highlightDigitsWithCorrectCommas(res.kandidat_kop, actual[1])}</td><td>${highlightDigitsWithCorrectCommas(res.kandidat_kepala, actual[2])}</td><td>${highlightDigitsWithCorrectCommas(res.kandidat_ekor, actual[3])}</td><td>${highlightAMWithCorrectCommas(res.angka_main, actual)}</td><td>${highlightCBWithCorrectCommas(res.colok_bebas, actual)}</td></tr>`;
+                            tableContent += `<tr>
+                                <td>${res.date}</td>
+                                <td>${actual}</td>
+                                <td>${highlightDigitsWithCorrectCommas(res.kandidat_as, actual[0])}</td>
+                                <td>${highlightDigitsWithCorrectCommas(res.kandidat_kop, actual[1])}</td>
+                                <td>${highlightDigitsWithCorrectCommas(res.kandidat_kepala, actual[2])}</td>
+                                <td>${highlightDigitsWithCorrectCommas(res.kandidat_ekor, actual[3])}</td>
+                                <td>${highlightAMWithCorrectCommas(res.angka_main, actual)}</td>
+                                <td>${highlightCBWithCorrectCommas(res.colok_bebas, actual)}</td>
+                            </tr>`;
                         });
                         ui.evaluationDetailTableBody.innerHTML = tableContent;
                     } else {
-                        ui.evaluationDetailTableBody.innerHTML = `<tr><td colspan="8" class="text-center text-muted">Tidak ada data evaluasi</td></tr>`;
+                        ui.evaluationDetailTableBody.innerHTML = `<tr><td colspan="8">Tidak ada hasil</td></tr>`;
                     }
                 } else if (data.status === 'failed') {
                     clearInterval(evaluationInterval);
                     ui.startEvaluationBtn.disabled = false;
                     ui.startEvaluationBtn.innerHTML = `<i class="fas fa-play-circle me-2"></i>Mulai Evaluasi`;
-                    ui.evaluationStatus.innerHTML = `<span class="badge bg-danger">Evaluasi Gagal</span><p class="text-danger small mt-2">${data.data?.error || 'Terjadi kesalahan'}</p>`;
-                } else if (data.status === 'running') {
-                    ui.evaluationStatus.innerHTML = `<div class="spinner-border text-info" role="status"></div><p class="mt-2">Evaluasi sedang berjalan...</p>`;
+                    ui.evaluationStatus.innerHTML = `<span class="badge bg-danger">Gagal</span>`;
                 }
-            }).catch(error => {
-                console.error('Error monitoring evaluation:', error);
-                clearInterval(evaluationInterval);
-                ui.startEvaluationBtn.disabled = false;
-                ui.startEvaluationBtn.innerHTML = `<i class="fas fa-play-circle me-2"></i>Mulai Evaluasi`;
-                ui.evaluationStatus.innerHTML = `<span class="badge bg-danger">Error</span><p class="text-danger small mt-2">Gagal memantau status evaluasi</p>`;
             });
         }, 2500);
     }
 
     function renderFeatureImportanceCharts(data) {
-        const chartOptions = { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, title: { display: true, color: '#333', font: { size: 14 } } }, scales: { x: { beginAtZero: true, ticks: { color: '#666' } }, y: { ticks: { color: '#666', font: { size: 11 } } } } };
+        const chartOptions = { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } };
         ['as', 'kop', 'kepala', 'ekor'].forEach(digit => {
             const chartData = data[digit] || [];
-            const ctx = document.getElementById(`${digit}Chart`).getContext('2d');
+            const ctx = document.getElementById(`${digit}Chart`)?.getContext('2d');
+            if(!ctx) return;
             if (charts[digit]) { charts[digit].destroy(); }
-            charts[digit] = new Chart(ctx, { type: 'bar', data: { labels: chartData.map(d => d.feature), datasets: [{ label: 'Importance', data: chartData.map(d => d.weight), backgroundColor: 'rgba(13, 110, 253, 0.7)', borderColor: 'rgba(13, 110, 253, 1)', borderWidth: 1 }] }, options: { ...chartOptions, plugins: { ...chartOptions.plugins, title: { ...chartOptions.plugins.title, text: `Top Features - ${digit.toUpperCase()} (${chartData.length})` } } } });
+            charts[digit] = new Chart(ctx, { type: 'bar', data: { labels: chartData.map(d => d.feature), datasets: [{ data: chartData.map(d => d.weight), backgroundColor: 'rgba(13, 110, 253, 0.7)' }] }, options: chartOptions });
         });
     }
 
     function loadFeatureImportance() {
         fetchData(`/feature-importance/${currentPasaran}`).then(data => {
-            if (data) { renderFeatureImportanceCharts(data); showAlert('Feature importance diperbarui', 'success'); }
+            if (data) renderFeatureImportanceCharts(data);
         });
     }
 
     function loadDriftLog() {
         fetchData('/drift-log').then(data => {
-            if (data && Array.isArray(data)) { ui.driftLog.textContent = data.join(''); showAlert('Drift log diperbarui', 'success'); }
+            if (data && Array.isArray(data)) { ui.driftLog.textContent = data.join(''); }
         });
     }
 
-    function initializeHealthPanel() {
-        ui.refreshFeatureImportance.addEventListener('click', loadFeatureImportance);
-        ui.refreshDriftLog.addEventListener('click', loadDriftLog);
-        loadFeatureImportance();
-        loadDriftLog();
-    }
-
     function initializeApp() {
+        // Event Listeners Utama
         ui.pasaranSelect.addEventListener('change', () => {
             currentPasaran = ui.pasaranSelect.value;
             updateSystemStatus();
             updateActivePasaranDisplay();
             ui.predictionDisplay.style.display = 'none';
-            ui.evaluationResultArea.style.display = 'none';
         });
         ui.predictBtn.addEventListener('click', getPrediction);
         ui.startTrainingBtn.addEventListener('click', startTraining);
         ui.updateDataBtn.addEventListener('click', startUpdateData);
+        ui.startTuningBtn.addEventListener('click', startTuning);
+        
+        // Event Listeners untuk Tab Tambahan
         ui.startEvaluationBtn.addEventListener('click', startEvaluation);
-        ui.evaluationTab.addEventListener('shown.bs.tab', () => { updateActivePasaranDisplay(); });
-        ui.healthTab.addEventListener('shown.bs.tab', () => { updateActivePasaranDisplay(); initializeHealthPanel(); });
+        ui.evaluationTab.addEventListener('shown.bs.tab', updateActivePasaranDisplay);
+        ui.healthTab.addEventListener('shown.bs.tab', () => {
+            updateActivePasaranDisplay();
+            loadFeatureImportance();
+            loadDriftLog();
+        });
+        ui.refreshFeatureImportance.addEventListener('click', loadFeatureImportance);
+        ui.refreshDriftLog.addEventListener('click', loadDriftLog);
+        
+        // Inisialisasi Tanggal
         const today = new Date();
         const tomorrow = new Date();
         tomorrow.setDate(today.getDate() + 1);
@@ -406,9 +445,9 @@ document.addEventListener('DOMContentLoaded', function() {
         ui.predictionDateInput.value = tomorrow.toISOString().split('T')[0];
         ui.evalEndDate.value = yesterday.toISOString().split('T')[0];
         ui.evalStartDate.value = aMonthAgo.toISOString().split('T')[0];
+        
         updateSystemStatus();
         updateActivePasaranDisplay();
-        ui.evaluationDetailTableBody.innerHTML = `<tr><td colspan="8" class="text-center text-muted">Pilih tanggal dan klik "Mulai Evaluasi" untuk melihat data</td></tr>`;
     }
     
     initializeApp();

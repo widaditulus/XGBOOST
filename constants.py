@@ -36,25 +36,19 @@ MARKET_CONFIGS = {
             "volatility_window": 10, "frequency_window": 30
         }
     },
-    # --- BLOK KHUSUS UNTUK SGP (DIPERBAIKI) ---
     "sgp": {
         "strategy": {
-            # SGP adalah pasaran yang stabil, kita buat model melihat lebih jauh ke belakang
             "timesteps": 30,
-            # Tetap sertakan kunci ini agar tidak hilang saat digabungkan
             "min_training_samples": 150
         },
         "feature_engineering": {
-            # Karena SGP tidak buka setiap hari, jendela analisis yang lebih lebar mungkin lebih baik
             "volatility_window": 15,
             "frequency_window": 120
         }
     }
 }
 
-# --- PARAMETER SISTEM ADAPTIF ---
 DRIFT_THRESHOLD = 0.4
-# UPDATED: Menyesuaikan ambang batas akurasi untuk deteksi anomali
 ACCURACY_THRESHOLD_FOR_RETRAIN = 0.08
 
 ADAPTIVE_LEARNING_CONFIG = {
@@ -62,7 +56,6 @@ ADAPTIVE_LEARNING_CONFIG = {
     "RECENCY_HALF_LIFE_DAYS": 45,
 }
 
-# --- KONFIGURASI ENSEMBLE ---
 ENSEMBLE_CONFIG = {
     "USE_ENSEMBLE": True,
     "rf_params": {
@@ -76,25 +69,28 @@ ENSEMBLE_CONFIG = {
     }
 }
 
-# --- KONFIGURASI CONTINUAL LEARNING ---
 CONTINUAL_LEARNING_CONFIG = {
     "ENABLED": True,
-    # Aktifkan pemicu retrain otomatis jika akurasi turun atau drift terdeteksi
     "AUTO_TRIGGER_ENABLED": True,
-    # Retrain hanya pada data 6 bulan (180 hari) terakhir
     "WINDOW_DAYS": 180
 }
 
-# --- PENAMBAHAN BARU: FILTER CERDAS BERLAPIS ---
-FILTER_CONFIG = {
-    # Ambang batas minimum hit rate historis. Jika angka tidak mencapai ini, ia akan difilter.
-    # Nilai 0.05 berarti 5%, dapat disesuaikan.
-    "MIN_HISTORICAL_HIT_RATE": 0.08 
+# --- UPDATED: MENGGANTI DYNAMIC_WEIGHTING_CONFIG DENGAN HYBRID_SCORING_CONFIG ---
+# Konfigurasi baru untuk sistem skoring hibrida yang lebih kuat dan terkontrol.
+HYBRID_SCORING_CONFIG = {
+    "ENABLED": True,
+    # Bobot untuk skor dari prediksi AI.
+    # Nilai antara 0.0 dan 1.0.
+    "AI_SCORE_WEIGHT": 0.8, # Artinya 80% pengaruh dari AI
+
+    # Bobot untuk skor dari frekuensi historis.
+    # Nilai antara 0.0 dan 1.0.
+    "HISTORICAL_SCORE_WEIGHT": 0.2, # Artinya 20% pengaruh dari data historis
+
+    # Pastikan AI_SCORE_WEIGHT + HISTORICAL_SCORE_WEIGHT = 1.0
 }
 
-# UPDATED: Konfigurasi bobot dinamis untuk pelatihan
-# Catatan: Konfigurasi ini tidak lagi digunakan secara langsung untuk penalti statis.
-# Logika yang lebih dinamis telah diimplementasikan di predictor.py.
+
 TRAINING_PENALTY_CONFIG = {
     "ENABLED": True,
     "LOW_HIT_RATE_PENALTY_FACTOR": 0.7,
