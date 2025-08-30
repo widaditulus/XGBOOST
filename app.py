@@ -19,7 +19,6 @@ from tuner import HyperparameterTuner
 
 app = Flask(__name__, template_folder='.', static_folder='.', static_url_path='')
 
-# --- State Global Aplikasi ---
 predictors_cache = {}
 predictor_lock = threading.Lock()
 training_status = {}
@@ -63,7 +62,6 @@ def get_predictor(pasaran: str) -> ModelPredictor:
 def index():
     return render_template('index.html', pasaran_list=PASARAN_LIST, display_mapping=PASARAN_DISPLAY_MAPPING)
 
-# --- Rute API untuk Training ---
 @app.route('/start-training', methods=['POST'])
 @validate_pasaran
 def start_training(pasaran):
@@ -110,7 +108,6 @@ def get_training_status(pasaran):
         message = training_status.get(f"{pasaran}_message", "")
     return jsonify({"status": status, "message": message})
     
-# --- RUTE API UNTUK HYPERPARAMETER TUNING ---
 @app.route('/start-tuning', methods=['POST'])
 @validate_pasaran
 def start_tuning(pasaran):
@@ -153,7 +150,6 @@ def get_tuning_status(pasaran):
         message = tuning_status.get(f"{pasaran}_message", "")
     return jsonify({"status": status, "message": message})
 
-# --- RUTE API UNTUK EVALUASI ---
 @app.route('/start-evaluation', methods=['POST'])
 @validate_pasaran
 def start_evaluation(pasaran):
@@ -200,7 +196,6 @@ def get_evaluation_status(pasaran):
         data = evaluation_status.get(f"{pasaran}_data", {})
     return jsonify({"status": status, "data": data})
 
-# --- RUTE API UNTUK UPDATE DATA ---
 @app.route('/update-data', methods=['POST'])
 @validate_pasaran
 def update_data(pasaran):
@@ -237,7 +232,6 @@ def get_update_status(pasaran):
         message = update_status.get(f"{pasaran}_message", "")
     return jsonify({"status": status, "message": message})
 
-# --- RUTE API UNTUK PREDIKSI ---
 @app.route('/predict', methods=['POST'])
 @validate_pasaran
 def predict(pasaran):
@@ -249,7 +243,17 @@ def predict(pasaran):
     except (PredictionError, DataFetchingError) as e:
         return jsonify({"error": "Gagal membuat prediksi", "details": str(e)}), 400
 
-# --- RUTE API UNTUK KESEHATAN MODEL ---
+@app.route('/check-optimized-params/<pasaran>')
+@validate_pasaran
+def check_optimized_params(pasaran):
+    model_dir = os.path.join(MODELS_DIR, pasaran)
+    all_files_exist = True
+    for digit in ["as", "kop", "kepala", "ekor"]:
+        if not os.path.exists(os.path.join(model_dir, f"best_params_{digit}.json")):
+            all_files_exist = False
+            break
+    return jsonify({"available": all_files_exist})
+
 @app.route('/feature-importance/<pasaran>')
 @validate_pasaran
 def get_feature_importance(pasaran):

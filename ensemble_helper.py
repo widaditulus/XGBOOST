@@ -58,6 +58,15 @@ def ensemble_predict_proba(models, X):
     for model_name, model in models.items():
         if model:
             try:
+                # UPDATED: Tambahkan validasi jumlah fitur sebelum prediksi
+                # Ini untuk mencegah crash jika model lama dimuat dengan data (fitur) baru
+                if hasattr(model, 'n_features_in_') and model.n_features_in_ != X.shape[1]:
+                    logger.warning(
+                        f"Skipping model '{model_name}' due to feature mismatch. "
+                        f"Model expects {model.n_features_in_} features, but input has {X.shape[1]}."
+                    )
+                    continue # Lewati model ini dan lanjut ke model berikutnya
+
                 probas = model.predict_proba(X)
                 all_probas.append(probas)
             except Exception as e:
@@ -66,10 +75,8 @@ def ensemble_predict_proba(models, X):
     if not all_probas:
         raise ValueError("Tidak ada model yang berhasil memberikan prediksi.")
 
-    # Optimasi: Jika hanya satu model yang berhasil, langsung kembalikan hasilnya.
     if len(all_probas) == 1:
         return all_probas[0]
 
-    # Merata-ratakan hasil probabilitas dari semua model yang berhasil
     avg_probas = np.mean(all_probas, axis=0)
     return avg_probas

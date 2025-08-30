@@ -11,6 +11,7 @@ import xgboost as xgb
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any
+from collections import OrderedDict, Counter
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
@@ -91,15 +92,23 @@ class FeatureProcessor:
         df['date'] = pd.to_datetime(df['date'])
         for i, digit in enumerate(self.digits):
             df[digit] = df["result"].str[i].astype('int8')
+        
         new_features = {}
+        digit_cols = df[self.digits]
+        new_features['digit_sum_prev'] = digit_cols.sum(axis=1).shift(1)
+        new_features['even_count_prev'] = (digit_cols % 2 == 0).sum(axis=1).shift(1)
+        new_features['odd_count_prev'] = (digit_cols % 2 != 0).sum(axis=1).shift(1)
+        new_features['low_count_prev'] = (digit_cols < 5).sum(axis=1).shift(1)
+        new_features['high_count_prev'] = (digit_cols >= 5).sum(axis=1).shift(1)
+
         new_features['dayofweek'] = df['date'].dt.dayofweek
         new_features['is_weekend'] = df['date'].dt.dayofweek.isin([5, 6]).astype(int)
         new_features['day_sin'] = np.sin(2 * np.pi * df['date'].dt.dayofweek / 6.0)
         new_features['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek / 6.0)
-        new_features['as_kop_sum_prev'] = (df['result'].str[0].astype(int) + df['result'].str[1].astype(int)).shift(1)
-        new_features['kepala_ekor_diff_prev'] = (df['result'].str[2].astype(int) - df['result'].str[3].astype(int)).shift(1)
-        new_features['as_mul_kop_prev'] = (df['result'].str[0].astype(int) * df['result'].str[1].astype(int)).shift(1)
-        new_features['kepala_mul_ekor_prev'] = (df['result'].str[2].astype(int) * df['result'].str[3].astype(int)).shift(1)
+        new_features['as_kop_sum_prev'] = (df['as'] + df['kop']).shift(1)
+        new_features['kepala_ekor_diff_prev'] = (df['kepala'] - df['ekor']).shift(1)
+        new_features['as_mul_kop_prev'] = (df['as'] * df['kop']).shift(1)
+        new_features['kepala_mul_ekor_prev'] = (df['kepala'] * df['ekor']).shift(1)
         vol_window = self.feature_config.get("volatility_window", 10)
         adv_window = 30
         for d in self.digits:
@@ -128,6 +137,14 @@ class FeatureProcessor:
             last_known_data[digit] = last_known_data["result"].str[i].astype('int8')
         pred_vector = {}
         last_row = last_known_data.iloc[-1]
+
+        last_digits = last_row[self.digits].values
+        pred_vector['digit_sum_prev'] = last_digits.sum()
+        pred_vector['even_count_prev'] = np.sum(last_digits % 2 == 0)
+        pred_vector['odd_count_prev'] = np.sum(last_digits % 2 != 0)
+        pred_vector['low_count_prev'] = np.sum(last_digits < 5)
+        pred_vector['high_count_prev'] = np.sum(last_digits >= 5)
+        
         pred_vector['dayofweek'] = target_date.dayofweek
         pred_vector['is_weekend'] = 1 if target_date.dayofweek in [5, 6] else 0
         pred_vector['day_sin'] = np.sin(2 * np.pi * target_date.dayofweek / 6.0)
@@ -161,16 +178,8 @@ class ModelTrainer:
     @error_handler(logger)
     def train_digit_model(self, X_full, y_full, digit, existing_model=None, feature_subset=None, sample_weights=None):
         try:
-            # Logika Cerdas untuk Memilih Parameter
-            best_params_path = os.path.join(MODELS_DIR, self.pasaran, f"best_params_{digit}.json")
-            if os.path.exists(best_params_path):
-                logger.info(f"Menggunakan parameter hasil optimasi dari {best_params_path} untuk digit {digit}.")
-                with open(best_params_path, 'r') as f:
-                    xgb_params = json.load(f)
-            else:
-                logger.info(f"Menggunakan parameter default dari mode training untuk digit {digit}.")
-                xgb_params = self.training_params.get("xgb_params", {}).get(digit, {})
-            
+            xgb_params = self.training_params
+
             le = LabelEncoder()
             y_encoded = le.fit_transform(y_full)
             if len(le.classes_) < 2:
@@ -189,13 +198,10 @@ class ModelTrainer:
                 else:
                     sample_weights = dynamic_weights
 
-            # UPDATED: Logika 'early_stopping_rounds' yang salah telah dihapus.
-            # Parameter ini sekarang dilewatkan langsung melalui xgb_params.
             model = xgb.XGBClassifier(**xgb_params)
 
             logger.info(f"Training model untuk {digit}. Warm-start: {'YES' if existing_model else 'NO'}.")
             
-            # UPDATED: Pemanggilan .fit() tidak lagi memerlukan **fit_params.
             model.fit(X_train, y_encoded, eval_set=[(X_train, y_encoded)], verbose=False, xgb_model=existing_model, sample_weight=sample_weights)
 
             importance_scores = model.get_booster().get_score(importance_type='weight')
@@ -267,17 +273,45 @@ class ModelPredictor:
     @error_handler(logger)
     def train_model(self, training_mode: str = 'OPTIMIZED', use_recency_bias: bool = True, custom_data: Optional[pd.DataFrame] = None) -> bool:
         logger.info(f"Memulai training untuk {self.pasaran} mode {training_mode}. Recency Bias: {use_recency_bias}")
-        self.config["training_params"] = TRAINING_CONFIG_OPTIONS.get(training_mode, TRAINING_CONFIG_OPTIONS['OPTIMIZED'])
-        model_trainer = ModelTrainer(self.digits, self.config["training_params"], self.pasaran)
+        
+        if training_mode == 'AUTO':
+            missing_files = []
+            for digit in self.digits:
+                best_params_path = os.path.join(self.model_dir_base, f"best_params_{digit}.json")
+                if not os.path.exists(best_params_path):
+                    missing_files.append(f"best_params_{digit}.json")
+            if missing_files:
+                raise TrainingError(
+                    f"Mode 'Gunakan Hasil Optimasi' (AUTO) gagal: File {', '.join(missing_files)} tidak ditemukan. "
+                    "Harap jalankan proses Optimasi terlebih dahulu."
+                )
+
         os.makedirs(self.model_dir_base, exist_ok=True)
+        
+        force_fresh_training = False
+        features_path = os.path.join(self.model_dir_base, "features.pkl")
+        old_feature_names = None
+        if os.path.exists(features_path):
+            try:
+                old_feature_names = joblib.load(features_path)
+            except Exception as e:
+                logger.warning(f"Gagal memuat file fitur lama: {e}. Training dari awal akan dipaksa.")
+                force_fresh_training = True
+
         df_full = custom_data if custom_data is not None and not custom_data.empty else self.data_manager.get_data(force_refresh=True, force_github=True)
         training_df = self.feature_processor.fit_transform(df_full)
         self.feature_names = self.feature_processor.feature_names
+        
+        if not force_fresh_training and old_feature_names is not None and set(old_feature_names) != set(self.feature_names):
+            force_fresh_training = True
+            logger.warning("Perubahan skema fitur terdeteksi. Training akan dipaksa berjalan dari awal (tanpa warm start).")
+
         min_samples = self.config["strategy"]["min_training_samples"]
         if len(training_df) < min_samples:
             raise TrainingError(f"Data tidak cukup untuk training setelah diproses. Perlu {min_samples}, tersedia {len(training_df)}.")
-        joblib.dump(self.feature_names, os.path.join(self.model_dir_base, "features.pkl"))
-        logger.info(f"Menyimpan {len(self.feature_names)} nama fitur ke features.pkl.")
+        joblib.dump(self.feature_names, features_path)
+        logger.info(f"Menyimpan {len(self.feature_names)} nama fitur ke {features_path}.")
+        
         sample_weights = None
         if use_recency_bias and ADAPTIVE_LEARNING_CONFIG["USE_RECENCY_WEIGHTING"]:
             days_since_latest = (training_df['date'].max() - training_df['date']).dt.days
@@ -285,11 +319,24 @@ class ModelPredictor:
             decay_rate = np.log(2) / half_life
             weights = np.exp(-decay_rate * days_since_latest)
             sample_weights = pd.Series(weights, index=training_df.index)
+
         for digit in self.digits:
+            if training_mode == 'AUTO':
+                best_params_path = os.path.join(self.model_dir_base, f"best_params_{digit}.json")
+                with open(best_params_path, 'r') as f:
+                    training_params = json.load(f)
+            else:
+                config_options = TRAINING_CONFIG_OPTIONS.get(training_mode, TRAINING_CONFIG_OPTIONS['OPTIMIZED'])
+                training_params = config_options.get("xgb_params", {}).get(digit, {})
+
+            model_trainer = ModelTrainer(self.digits, training_params, self.pasaran)
             y_full = training_df[digit]
             X_full = training_df[self.feature_names]
+
             if y_full.nunique() < 2: continue
-            existing_model = self.models.get(digit) if self.models_ready else None
+            
+            existing_model = self.models.get(digit) if self.models_ready and not force_fresh_training else None
+            
             model, le, importance, y_encoded = model_trainer.train_digit_model(
                 X_full, y_full, digit,
                 existing_model=existing_model,
@@ -323,7 +370,10 @@ class ModelPredictor:
         latest_features = latest_features.reindex(columns=self.feature_names, fill_value=0)
         predictions = {}
         all_probas_for_eval = {}
-        all_candidates_with_scores = []
+        
+        all_top_candidates = []
+        digit_scores = {}
+
         scoring_config = HYBRID_SCORING_CONFIG
         use_hybrid_scoring = scoring_config.get("ENABLED", False)
         ai_weight = scoring_config.get("AI_SCORE_WEIGHT", 0.8)
@@ -335,7 +385,18 @@ class ModelPredictor:
             if ENSEMBLE_CONFIG.get("USE_ENSEMBLE"):
                 current_models['rf'] = self.rf_models.get(d)
                 current_models['lgbm'] = self.lgbm_models.get(d)
-            raw_probabilities = ensemble_predict_proba(current_models, latest_features)[0]
+            
+            try:
+                raw_probabilities = ensemble_predict_proba(current_models, latest_features)[0]
+            except ValueError as e:
+                if "Tidak ada model yang berhasil memberikan prediksi" in str(e):
+                    raise PredictionError(
+                        "Semua model yang dimuat tidak sesuai dengan set fitur saat ini. "
+                        "Harap jalankan kembali proses training untuk memperbarui model."
+                    )
+                else:
+                    raise e
+
             if use_hybrid_scoring:
                 ai_scores = raw_probabilities
                 historical_freq = historical_data[d].value_counts(normalize=True)
@@ -351,17 +412,46 @@ class ModelPredictor:
             top_indices = np.argsort(final_scores)[::-1]
             top_two_digits = encoder.inverse_transform(top_indices[:2])
             predictions[d] = [str(digit) for digit in top_two_digits]
-            for digit_class_index in top_indices:
-                digit_val = encoder.classes_[digit_class_index]
-                score_val = final_scores[digit_class_index]
-                all_candidates_with_scores.append((str(digit_val), score_val))
-        if not all_candidates_with_scores:
+            
+            all_top_candidates.extend(predictions[d])
+            for i in range(len(encoder.classes_)):
+                digit_val = str(encoder.classes_[i])
+                if digit_val not in digit_scores:
+                    digit_scores[digit_val] = []
+                digit_scores[digit_val].append(final_scores[i])
+
+        if not all_top_candidates:
             best_cb_from_all = ""
         else:
-            best_cb_from_all = max(all_candidates_with_scores, key=lambda item: item[1])[0]
+            counts = Counter(all_top_candidates)
+            max_freq = max(counts.values())
+            most_common_digits = [d for d, freq in counts.items() if freq == max_freq]
+            
+            if len(most_common_digits) == 1:
+                best_cb_from_all = most_common_digits[0]
+            else:
+                best_cb_from_all = max(
+                    most_common_digits,
+                    key=lambda d: np.mean(digit_scores.get(d, [0]))
+                )
+
         kandidat_as, kandidat_kop, kandidat_kepala, kandidat_ekor = predictions['as'], predictions['kop'], predictions['kepala'], predictions['ekor']
-        combined_candidates = kandidat_as + kandidat_kop + kandidat_kepala + kandidat_ekor
-        angka_main_set = sorted(list(set(combined_candidates)))
+        
+        am_candidates = OrderedDict()
+        am_candidates[kandidat_as[0]] = None
+        am_candidates[kandidat_kop[0]] = None
+        am_candidates[kandidat_kepala[0]] = None
+        am_candidates[kandidat_ekor[0]] = None
+        
+        if len(am_candidates) < 4:
+            backup_pool = [kandidat_as[1], kandidat_kop[1], kandidat_kepala[1], kandidat_ekor[1]]
+            for cand in backup_pool:
+                if len(am_candidates) >= 4:
+                    break
+                am_candidates[cand] = None
+        
+        angka_main_list = sorted(list(am_candidates.keys()))[:4]
+
         result = {
             "prediction_date": target_date.strftime("%Y-%m-%d"),
             "final_4d_prediction": f"{kandidat_as[0]}{kandidat_kop[0]}{kandidat_kepala[0]}{kandidat_ekor[0]}",
@@ -369,7 +459,7 @@ class ModelPredictor:
             "kandidat_kop": ", ".join(kandidat_kop),
             "kandidat_kepala": ", ".join(kandidat_kepala),
             "kandidat_ekor": ", ".join(kandidat_ekor),
-            "angka_main": ", ".join(angka_main_set[:4]),
+            "angka_main": ", ".join(angka_main_list),
             "colok_bebas": best_cb_from_all
         }
         if for_evaluation:

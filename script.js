@@ -7,6 +7,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let updateInterval = null; 
     let tuningInterval = null;
     const charts = {};
+    const notifiedAutoMode = new Set(); // REVISI FINAL: Lacak notifikasi per pasaran
 
     const ui = {
         pasaranSelect: document.getElementById('pasaranSelect'),
@@ -81,6 +82,24 @@ document.addEventListener('DOMContentLoaded', function() {
             showAlert(error.message, 'danger');
             return null;
         }
+    }
+
+    function checkAutoModeAvailability() {
+        if (!currentPasaran) return;
+        const autoOption = ui.trainingMode.querySelector('option[value="AUTO"]');
+        if (!autoOption) return;
+
+        fetchData(`/check-optimized-params/${currentPasaran}`).then(data => {
+            if (data) {
+                autoOption.disabled = !data.available;
+                if (data.available && !notifiedAutoMode.has(currentPasaran)) { // REVISI FINAL
+                    showAlert(`Mode 'Gunakan Hasil Optimasi' tersedia untuk ${currentPasaran.toUpperCase()}.`, 'info');
+                    notifiedAutoMode.add(currentPasaran); // REVISI FINAL
+                } else if (!data.available && ui.trainingMode.value === "AUTO") {
+                    ui.trainingMode.value = "OPTIMIZED";
+                }
+            }
+        });
     }
 
     function updateActivePasaranDisplay() {
@@ -268,12 +287,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (data.status === 'completed') {
                         ui.tuningActivityStatus.innerHTML = `<i class="fas fa-check-circle me-2 text-success"></i>${data.message}`;
                         showAlert('Optimasi parameter selesai!', 'success');
-                        const autoOption = ui.trainingMode.querySelector('option[value="AUTO"]');
-                        if(autoOption) {
-                            autoOption.disabled = false;
-                            ui.trainingMode.value = "AUTO";
-                            showAlert('Mode training "Gunakan Hasil Optimasi" sekarang tersedia.', 'info');
-                        }
+                        checkAutoModeAvailability();
                     } else {
                         ui.tuningActivityStatus.innerHTML = `<i class="fas fa-exclamation-triangle me-2 text-danger"></i>Error: ${data.message}`;
                         showAlert('Optimasi parameter gagal!', 'danger');
@@ -282,8 +296,6 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         }, 5000);
     }
-
-    // --- FUNGSI UNTUK EVALUASI & KESEHATAN MODEL ---
 
     function startEvaluation() {
         if (!ui.evalStartDate.value || !ui.evalEndDate.value) {
@@ -316,7 +328,6 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
-    // --- UPDATED: FUNGSI-FUNGSI HIGHLIGHT DIKEMBALIKAN ---
     const highlightDigitsWithCorrectCommas = (predictions_str, actual_digit) => {
         if (!predictions_str) return '<span>-</span>';
         const digits = predictions_str.split(', ');
@@ -358,7 +369,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                     
                     if (results && results.length > 0) {
-                        // --- UPDATED: Panggil fungsi highlight saat membangun tabel ---
                         let tableContent = '';
                         results.forEach(res => {
                             const actual = res.actual || '----';
@@ -411,19 +421,18 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function initializeApp() {
-        // Event Listeners Utama
         ui.pasaranSelect.addEventListener('change', () => {
             currentPasaran = ui.pasaranSelect.value;
             updateSystemStatus();
             updateActivePasaranDisplay();
             ui.predictionDisplay.style.display = 'none';
+            checkAutoModeAvailability();
         });
         ui.predictBtn.addEventListener('click', getPrediction);
         ui.startTrainingBtn.addEventListener('click', startTraining);
         ui.updateDataBtn.addEventListener('click', startUpdateData);
         ui.startTuningBtn.addEventListener('click', startTuning);
         
-        // Event Listeners untuk Tab Tambahan
         ui.startEvaluationBtn.addEventListener('click', startEvaluation);
         ui.evaluationTab.addEventListener('shown.bs.tab', updateActivePasaranDisplay);
         ui.healthTab.addEventListener('shown.bs.tab', () => {
@@ -434,7 +443,6 @@ document.addEventListener('DOMContentLoaded', function() {
         ui.refreshFeatureImportance.addEventListener('click', loadFeatureImportance);
         ui.refreshDriftLog.addEventListener('click', loadDriftLog);
         
-        // Inisialisasi Tanggal
         const today = new Date();
         const tomorrow = new Date();
         tomorrow.setDate(today.getDate() + 1);
@@ -448,6 +456,7 @@ document.addEventListener('DOMContentLoaded', function() {
         
         updateSystemStatus();
         updateActivePasaranDisplay();
+        checkAutoModeAvailability();
     }
     
     initializeApp();
