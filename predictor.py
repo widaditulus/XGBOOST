@@ -357,8 +357,50 @@ class ModelPredictor:
         self.models_ready = self.load_models()
         return self.models_ready
 
+    # UPDATED: Penambahan metode helper _determine_colok_bebas
+    def _determine_colok_bebas(self, all_candidates: List[str], digit_scores: Dict[str, List[float]]) -> str:
+        """Menentukan kandidat Colok Bebas terbaik berdasarkan frekuensi dan skor."""
+        if not all_candidates:
+            return ""
+        
+        counts = Counter(all_candidates)
+        max_freq = max(counts.values())
+        most_common_digits = [d for d, freq in counts.items() if freq == max_freq]
+        
+        if len(most_common_digits) == 1:
+            return most_common_digits[0]
+        else:
+            # Jika ada lebih dari satu yang paling umum, pilih berdasarkan skor rata-rata tertinggi
+            return max(
+                most_common_digits,
+                key=lambda d: np.mean(digit_scores.get(d, [0]))
+            )
+
+    # UPDATED: Penambahan metode helper _determine_angka_main
+    def _determine_angka_main(self, predictions: Dict[str, List[str]]) -> List[str]:
+        """Menyusun 4 digit Angka Main dari kandidat teratas."""
+        am_candidates = OrderedDict()
+        am_candidates[predictions['as'][0]] = None
+        am_candidates[predictions['kop'][0]] = None
+        am_candidates[predictions['kepala'][0]] = None
+        am_candidates[predictions['ekor'][0]] = None
+        
+        # Jika digit unik kurang dari 4, ambil dari kandidat kedua untuk melengkapi
+        if len(am_candidates) < 4:
+            backup_pool = [
+                predictions['as'][1], predictions['kop'][1], 
+                predictions['kepala'][1], predictions['ekor'][1]
+            ]
+            for cand in backup_pool:
+                if len(am_candidates) >= 4:
+                    break
+                am_candidates[cand] = None
+        
+        return sorted(list(am_candidates.keys()))[:4]
+
     @error_handler(drift_logger)
     def predict_next_day(self, target_date_str: Optional[str] = None, for_evaluation: bool = False) -> Dict[str, Any]:
+        # UPDATED: Isi fungsi ini di-refactor untuk meningkatkan keterbacaan
         if not self.models_ready:
             raise PredictionError("Model tidak siap. Silakan jalankan training.")
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
@@ -368,9 +410,9 @@ class ModelPredictor:
             historical_data[digit] = historical_data["result"].str[i].astype('int8')
         latest_features = self.feature_processor.transform_for_prediction(base_df, target_date)
         latest_features = latest_features.reindex(columns=self.feature_names, fill_value=0)
+        
         predictions = {}
         all_probas_for_eval = {}
-        
         all_top_candidates = []
         digit_scores = {}
 
@@ -378,6 +420,7 @@ class ModelPredictor:
         use_hybrid_scoring = scoring_config.get("ENABLED", False)
         ai_weight = scoring_config.get("AI_SCORE_WEIGHT", 0.8)
         hist_weight = scoring_config.get("HISTORICAL_SCORE_WEIGHT", 0.2)
+        
         for d in self.digits:
             encoder = self.label_encoders[d]
             if not encoder: raise PredictionError(f"Encoder untuk digit '{d}' tidak tersedia.")
@@ -408,6 +451,7 @@ class ModelPredictor:
                 final_scores = (ai_scores * ai_weight) + (hist_scores * hist_weight)
             else:
                 final_scores = raw_probabilities
+            
             all_probas_for_eval[d] = final_scores
             top_indices = np.argsort(final_scores)[::-1]
             top_two_digits = encoder.inverse_transform(top_indices[:2])
@@ -420,48 +464,21 @@ class ModelPredictor:
                     digit_scores[digit_val] = []
                 digit_scores[digit_val].append(final_scores[i])
 
-        if not all_top_candidates:
-            best_cb_from_all = ""
-        else:
-            counts = Counter(all_top_candidates)
-            max_freq = max(counts.values())
-            most_common_digits = [d for d, freq in counts.items() if freq == max_freq]
-            
-            if len(most_common_digits) == 1:
-                best_cb_from_all = most_common_digits[0]
-            else:
-                best_cb_from_all = max(
-                    most_common_digits,
-                    key=lambda d: np.mean(digit_scores.get(d, [0]))
-                )
-
-        kandidat_as, kandidat_kop, kandidat_kepala, kandidat_ekor = predictions['as'], predictions['kop'], predictions['kepala'], predictions['ekor']
-        
-        am_candidates = OrderedDict()
-        am_candidates[kandidat_as[0]] = None
-        am_candidates[kandidat_kop[0]] = None
-        am_candidates[kandidat_kepala[0]] = None
-        am_candidates[kandidat_ekor[0]] = None
-        
-        if len(am_candidates) < 4:
-            backup_pool = [kandidat_as[1], kandidat_kop[1], kandidat_kepala[1], kandidat_ekor[1]]
-            for cand in backup_pool:
-                if len(am_candidates) >= 4:
-                    break
-                am_candidates[cand] = None
-        
-        angka_main_list = sorted(list(am_candidates.keys()))[:4]
+        # UPDATED: Panggilan ke metode helper yang baru
+        colok_bebas = self._determine_colok_bebas(all_top_candidates, digit_scores)
+        angka_main = self._determine_angka_main(predictions)
 
         result = {
             "prediction_date": target_date.strftime("%Y-%m-%d"),
-            "final_4d_prediction": f"{kandidat_as[0]}{kandidat_kop[0]}{kandidat_kepala[0]}{kandidat_ekor[0]}",
-            "kandidat_as": ", ".join(kandidat_as),
-            "kandidat_kop": ", ".join(kandidat_kop),
-            "kandidat_kepala": ", ".join(kandidat_kepala),
-            "kandidat_ekor": ", ".join(kandidat_ekor),
-            "angka_main": ", ".join(angka_main_list),
-            "colok_bebas": best_cb_from_all
+            "final_4d_prediction": f"{predictions['as'][0]}{predictions['kop'][0]}{predictions['kepala'][0]}{predictions['ekor'][0]}",
+            "kandidat_as": ", ".join(predictions['as']),
+            "kandidat_kop": ", ".join(predictions['kop']),
+            "kandidat_kepala": ", ".join(predictions['kepala']),
+            "kandidat_ekor": ", ".join(predictions['ekor']),
+            "angka_main": ", ".join(angka_main),
+            "colok_bebas": colok_bebas
         }
+        
         if for_evaluation:
             result["probabilities"] = all_probas_for_eval
             result["label_encoders"] = self.label_encoders
