@@ -236,6 +236,10 @@ def get_update_status(pasaran):
 @validate_pasaran
 def predict(pasaran):
     prediction_date_str = request.form.get('prediction_date')
+    # UPDATED: Menambahkan validasi eksplisit untuk 'prediction_date'
+    if not prediction_date_str:
+        abort(400, description="Parameter 'prediction_date' tidak boleh kosong.")
+    
     try:
         predictor = get_predictor(pasaran)
         prediction_result = predictor.predict_next_day(target_date_str=prediction_date_str)

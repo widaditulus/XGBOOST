@@ -41,6 +41,7 @@ def test_predict_missing_date(client):
     """Test 3: Memastikan endpoint prediksi mengembalikan 400 jika tanggal tidak ada."""
     response = client.post('/predict', data={'pasaran': 'sgp'})
     assert response.status_code == 400
+    # UPDATED: Menyesuaikan pesan error yang diharapkan dengan perbaikan di app.py
     assert b"tidak boleh kosong" in response.data
 
 @patch('data_fetcher.requests.get')
@@ -103,4 +104,3 @@ def test_predict_endpoint_success(mock_predict, client):
         assert response.status_code == 200
         json_data = response.get_json()
         assert json_data['final_4d_prediction'] == "1234"
-        

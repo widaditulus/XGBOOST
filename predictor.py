@@ -231,12 +231,16 @@ class ModelPredictor:
             logger.warning(f"Gagal memuat data awal untuk {self.pasaran}, mungkin perlu training: {e}")
         self.models_ready = self.load_models()
 
+    # UPDATED: Logika diubah agar tidak bergantung pada kunci 'default'
     def _get_config(self) -> Dict[str, Any]:
-        default_config = MARKET_CONFIGS["default"].copy()
-        market_specific_config = MARKET_CONFIGS.get(self.pasaran, {})
-        default_config.update(market_specific_config)
-        default_config["training_params"] = TRAINING_CONFIG_OPTIONS.get('OPTIMIZED')
-        return default_config
+        market_config = MARKET_CONFIGS.get(self.pasaran)
+        if not market_config:
+            raise KeyError(f"Konfigurasi untuk pasaran '{self.pasaran}' tidak ditemukan di MARKET_CONFIGS.")
+        
+        # Buat salinan untuk menghindari modifikasi konstanta asli
+        config = market_config.copy()
+        config["training_params"] = TRAINING_CONFIG_OPTIONS.get('OPTIMIZED')
+        return config
 
     @error_handler(logger)
     def load_models(self) -> bool:
@@ -357,7 +361,6 @@ class ModelPredictor:
         self.models_ready = self.load_models()
         return self.models_ready
 
-    # UPDATED: Penambahan metode helper _determine_colok_bebas
     def _determine_colok_bebas(self, all_candidates: List[str], digit_scores: Dict[str, List[float]]) -> str:
         """Menentukan kandidat Colok Bebas terbaik berdasarkan frekuensi dan skor."""
         if not all_candidates:
@@ -376,7 +379,6 @@ class ModelPredictor:
                 key=lambda d: np.mean(digit_scores.get(d, [0]))
             )
 
-    # UPDATED: Penambahan metode helper _determine_angka_main
     def _determine_angka_main(self, predictions: Dict[str, List[str]]) -> List[str]:
         """Menyusun 4 digit Angka Main dari kandidat teratas."""
         am_candidates = OrderedDict()
@@ -400,7 +402,6 @@ class ModelPredictor:
 
     @error_handler(drift_logger)
     def predict_next_day(self, target_date_str: Optional[str] = None, for_evaluation: bool = False) -> Dict[str, Any]:
-        # UPDATED: Isi fungsi ini di-refactor untuk meningkatkan keterbacaan
         if not self.models_ready:
             raise PredictionError("Model tidak siap. Silakan jalankan training.")
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
@@ -454,8 +455,9 @@ class ModelPredictor:
             
             all_probas_for_eval[d] = final_scores
             top_indices = np.argsort(final_scores)[::-1]
-            top_two_digits = encoder.inverse_transform(top_indices[:2])
-            predictions[d] = [str(digit) for digit in top_two_digits]
+            
+            top_three_digits = encoder.inverse_transform(top_indices[:3])
+            predictions[d] = [str(digit) for digit in top_three_digits]
             
             all_top_candidates.extend(predictions[d])
             for i in range(len(encoder.classes_)):
@@ -464,7 +466,6 @@ class ModelPredictor:
                     digit_scores[digit_val] = []
                 digit_scores[digit_val].append(final_scores[i])
 
-        # UPDATED: Panggilan ke metode helper yang baru
         colok_bebas = self._determine_colok_bebas(all_top_candidates, digit_scores)
         angka_main = self._determine_angka_main(predictions)
 

@@ -3,6 +3,8 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, timedelta
 import pandas as pd
+# UPDATED: Menambahkan impor 'threading' yang hilang untuk memperbaiki NameError
+import threading
 from utils import logger
 from constants import CONTINUAL_LEARNING_CONFIG
 
