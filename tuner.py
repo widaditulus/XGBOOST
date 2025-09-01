@@ -1,4 +1,4 @@
-# tuner.py
+# tuner.py (Versi Lengkap dengan Perbaikan)
 
 # -*- coding: utf-8 -*-
 import os
@@ -13,13 +13,13 @@ from sklearn.metrics import log_loss
 
 from predictor import FeatureProcessor, DataManager
 from utils import logger, error_handler
-from constants import MODELS_DIR
+from constants import MODELS_DIR, MARKET_CONFIGS
 
 # Konfigurasi untuk proses tuning
 TUNING_CONFIG = {
-    "N_TRIALS": 50,  # Jumlah kombinasi parameter yang akan dicoba
+    "N_TRIALS": 75,  # Jumlah kombinasi parameter yang akan dicoba
     "N_SPLITS": 3,   # Jumlah lipatan untuk cross-validation
-    "TIMEOUT": 3600  # Batas waktu maksimal dalam detik (1 jam)
+    "TIMEOUT": 4000  # Batas waktu maksimal dalam detik (1 jam)
 }
 
 class HyperparameterTuner:
@@ -38,9 +38,11 @@ class HyperparameterTuner:
         data_manager = DataManager(self.pasaran)
         df_full = data_manager.get_data(force_refresh=True, force_github=True)
         
-        # Mengambil config timesteps dari Market Config (meskipun default)
-        from constants import MARKET_CONFIGS
-        config = MARKET_CONFIGS.get(self.pasaran, MARKET_CONFIGS["default"])
+        # --- PERBAIKAN DI SINI ---
+        # Langsung mengambil konfigurasi spesifik untuk pasaran, tanpa fallback 'default'
+        config = MARKET_CONFIGS[self.pasaran]
+        # -------------------------
+        
         timesteps = config["strategy"]["timesteps"]
         feature_config = config["feature_engineering"]
 

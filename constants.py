@@ -28,60 +28,61 @@ PASARAN_DISPLAY_MAPPING = {
 MARKET_CONFIGS = {
     "sgp": {
         "strategy": {
-            "timesteps": 35,
-            "min_training_samples":180
+            "timesteps": 25,
+            "min_training_samples": 180
+        },
         "feature_engineering": {
             "volatility_window": 30,
-            "frequency_window": 70
+            "frequency_window": 90
         }
     },
     "hk": {
         "strategy": {
-            "timesteps": 35, # HK lebih dinamis, pola jangka menengah lebih relevan
-            "min_training_samples": 150
+            "timesteps": 15, # HK lebih dinamis, pola jangka menengah lebih relevan
+            "min_training_samples": 180
         },
         "feature_engineering": {
-            "volatility_window": 35,
+            "volatility_window": 30,
             "frequency_window": 90
         }
     },
     "sydney": {
         "strategy": {
-            "timesteps": 35, # Sydney cenderung memiliki tren jangka panjang yang lebih stabil
-            "min_training_samples": 150
+            "timesteps": 15, # Sydney cenderung memiliki tren jangka panjang yang lebih stabil
+            "min_training_samples": 180
         },
         "feature_engineering": {
-            "volatility_window": 35,
+            "volatility_window": 30,
             "frequency_window": 90
         }
     },
     "taiwan": {
         "strategy": {
-            "timesteps": 22, # Data Taiwan bisa cukup acak, fokus pada pola jangka pendek-menengah
-            "min_training_samples": 100
+            "timesteps": 15, # Data Taiwan bisa cukup acak, fokus pada pola jangka pendek-menengah
+            "min_training_samples": 150
         },
         "feature_engineering": {
-            "volatility_window": 40,
-            "frequency_window": 120
+            "volatility_window": 30,
+            "frequency_window": 60
         }
     },
     "china": {
         "strategy": {
-            "timesteps": 18, # Pola di pasaran China seringkali lebih pendek
-            "min_training_samples": 100
+            "timesteps": 15, # Pola di pasaran China seringkali lebih pendek
+            "min_training_samples": 180
         },
         "feature_engineering": {
-            "volatility_window": 35,
+            "volatility_window": 30,
             "frequency_window": 90
         }
     },
     "magnum": {
         "strategy": {
             "timesteps": 15, # Fokus pada data yang sangat baru karena karakteristiknya
-            "min_training_samples": 80 # Mungkin memiliki data historis lebih sedikit
+            "min_training_samples": 190 # Mungkin memiliki data historis lebih sedikit
         },
         "feature_engineering": {
-            "volatility_window": 35,
+            "volatility_window": 30,
             "frequency_window": 90
         }
     }
@@ -93,7 +94,7 @@ CRITICAL_ACCURACY_THRESHOLD = 0.05
 
 ADAPTIVE_LEARNING_CONFIG = {
     "USE_RECENCY_WEIGHTING": True,
-    "RECENCY_HALF_LIFE_DAYS": 45,
+    "RECENCY_HALF_LIFE_DAYS": 30,
 }
 
 ENSEMBLE_CONFIG = {
@@ -112,13 +113,13 @@ ENSEMBLE_CONFIG = {
 CONTINUAL_LEARNING_CONFIG = {
     "ENABLED": True,
     "AUTO_TRIGGER_ENABLED": True,
-    "WINDOW_DAYS": 45
+    "WINDOW_DAYS": 30
 }
 
 HYBRID_SCORING_CONFIG = {
     "ENABLED": True,
-    "AI_SCORE_WEIGHT": 0.5, 
-    "HISTORICAL_SCORE_WEIGHT": 0.5,
+    "AI_SCORE_WEIGHT": 0.6, 
+    "HISTORICAL_SCORE_WEIGHT": 0.4,
 }
 
 TRAINING_PENALTY_CONFIG = {
