@@ -29,6 +29,8 @@ update_status = {}
 update_lock = threading.Lock()
 tuning_status = {}
 tuning_lock = threading.Lock()
+cb_tuning_status = {} # Status terpisah untuk tuning CB
+cb_tuning_lock = threading.Lock()
 
 
 @app.errorhandler(Exception)
@@ -68,7 +70,7 @@ def start_training(pasaran):
     training_mode = request.form.get('training_mode', 'OPTIMIZED')
     use_recency_bias = request.form.get('use_recency_bias') == 'true'
 
-    if training_mode != 'AUTO' and training_mode not in TRAINING_CONFIG_OPTIONS:
+    if training_mode not in TRAINING_CONFIG_OPTIONS and training_mode != 'AUTO':
         abort(400, description=f"Mode training '{training_mode}' tidak valid.")
         
     with training_lock:
@@ -113,34 +115,31 @@ def get_training_status(pasaran):
 def start_tuning(pasaran):
     with tuning_lock:
         if tuning_status.get(pasaran) == 'running':
-            return jsonify({"status": "error", "message": f"Optimasi untuk {pasaran.upper()} sudah berjalan."}), 409
+            return jsonify({"status": "error", "message": f"Optimasi 4D untuk {pasaran.upper()} sudah berjalan."}), 409
         tuning_status[pasaran] = 'running'
-        tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter..."
+        tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter 4D..."
 
     thread = threading.Thread(target=run_tuning_in_background, args=(pasaran,))
     thread.daemon = True
     thread.start()
-    return jsonify({"status": "success", "message": f"Optimasi parameter untuk {pasaran.upper()} telah dimulai."})
+    return jsonify({"status": "success", "message": f"Optimasi parameter 4D untuk {pasaran.upper()} telah dimulai."})
 
 def run_tuning_in_background(pasaran: str):
     digits = ["as", "kop", "kepala", "ekor"]
     try:
         for digit in digits:
             with tuning_lock:
-                tuning_status[f"{pasaran}_message"] = f"Mengoptimasi parameter untuk digit: {digit.upper()}..."
-
-            tuner = HyperparameterTuner(pasaran, digit)
+                tuning_status[f"{pasaran}_message"] = f"Mengoptimasi parameter 4D untuk digit: {digit.upper()}..."
+            tuner = HyperparameterTuner(pasaran, digit, mode='4D')
             tuner.run_tuning()
-
         with tuning_lock:
             tuning_status[pasaran] = "completed"
-            tuning_status[f"{pasaran}_message"] = f"Optimasi untuk {pasaran.upper()} berhasil. Parameter terbaik telah disimpan."
-
+            tuning_status[f"{pasaran}_message"] = f"Optimasi 4D untuk {pasaran.upper()} berhasil."
     except Exception as e:
         with tuning_lock:
             tuning_status[pasaran] = "failed"
-            tuning_status[f"{pasaran}_message"] = f"Error saat optimasi: {str(e)}"
-        logger.error(f"Exception di thread tuning untuk {pasaran}: {e}", exc_info=True)
+            tuning_status[f"{pasaran}_message"] = f"Error saat optimasi 4D: {str(e)}"
+        logger.error(f"Exception di thread tuning 4D untuk {pasaran}: {e}", exc_info=True)
 
 @app.route('/tuning-status', methods=['GET'])
 @validate_pasaran
@@ -148,6 +147,45 @@ def get_tuning_status(pasaran):
     with tuning_lock:
         status = tuning_status.get(pasaran, 'idle')
         message = tuning_status.get(f"{pasaran}_message", "")
+    return jsonify({"status": status, "message": message})
+
+@app.route('/start-tuning-cb', methods=['POST'])
+@validate_pasaran
+def start_cb_tuning(pasaran):
+    with cb_tuning_lock:
+        if cb_tuning_status.get(pasaran) == 'running':
+            return jsonify({"status": "error", "message": f"Optimasi CB untuk {pasaran.upper()} sudah berjalan."}), 409
+        cb_tuning_status[pasaran] = 'running'
+        cb_tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter CB..."
+
+    thread = threading.Thread(target=run_cb_tuning_in_background, args=(pasaran,))
+    thread.daemon = True
+    thread.start()
+    return jsonify({"status": "success", "message": f"Optimasi parameter CB untuk {pasaran.upper()} telah dimulai."})
+
+def run_cb_tuning_in_background(pasaran: str):
+    try:
+        for i in range(10):
+            digit = str(i)
+            with cb_tuning_lock:
+                cb_tuning_status[f"{pasaran}_message"] = f"Mengoptimasi parameter CB untuk digit: {digit}..."
+            tuner = HyperparameterTuner(pasaran, digit, mode='CB')
+            tuner.run_tuning()
+        with cb_tuning_lock:
+            cb_tuning_status[pasaran] = "completed"
+            cb_tuning_status[f"{pasaran}_message"] = f"Optimasi CB untuk {pasaran.upper()} berhasil."
+    except Exception as e:
+        with cb_tuning_lock:
+            cb_tuning_status[pasaran] = "failed"
+            cb_tuning_status[f"{pasaran}_message"] = f"Error saat optimasi CB: {str(e)}"
+        logger.error(f"Exception di thread tuning CB untuk {pasaran}: {e}", exc_info=True)
+
+@app.route('/cb-tuning-status', methods=['GET'])
+@validate_pasaran
+def get_cb_tuning_status(pasaran):
+    with cb_tuning_lock:
+        status = cb_tuning_status.get(pasaran, 'idle')
+        message = cb_tuning_status.get(f"{pasaran}_message", "")
     return jsonify({"status": status, "message": message})
 
 @app.route('/start-evaluation', methods=['POST'])
@@ -236,7 +274,6 @@ def get_update_status(pasaran):
 @validate_pasaran
 def predict(pasaran):
     prediction_date_str = request.form.get('prediction_date')
-    # UPDATED: Menambahkan validasi eksplisit untuk 'prediction_date'
     if not prediction_date_str:
         abort(400, description="Parameter 'prediction_date' tidak boleh kosong.")
     

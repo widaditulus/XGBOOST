@@ -1,4 +1,4 @@
-# predictor.py (Final - Lengkap dan Fungsional)
+# predictor.py (Final - Dengan Strategi CB Hibrida dan Integrasi Tuning)
 
 # -*- coding: utf-8 -*-
 import os
@@ -11,7 +11,7 @@ import xgboost as xgb
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any
-from collections import OrderedDict, Counter
+from collections import OrderedDict
 
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
@@ -19,9 +19,10 @@ import lightgbm as lgb
 
 from constants import (MODELS_DIR, MARKET_CONFIGS, DRIFT_THRESHOLD,
                      ACCURACY_THRESHOLD_FOR_RETRAIN, ADAPTIVE_LEARNING_CONFIG,
-                     ENSEMBLE_CONFIG, TRAINING_PENALTY_CONFIG, HYBRID_SCORING_CONFIG)
+                     ENSEMBLE_CONFIG, TRAINING_PENALTY_CONFIG, HYBRID_SCORING_CONFIG,
+                     CB_STRATEGY_CONFIG)
 from utils import logger, error_handler, drift_logger
-from model_config import TRAINING_CONFIG_OPTIONS
+from model_config import TRAINING_CONFIG_OPTIONS, XGB_PARAMS_CB
 from exceptions import TrainingError, PredictionError, DataFetchingError
 from data_fetcher import DataFetcher
 from evaluation import calculate_brier_score, calculate_ece
@@ -74,6 +75,7 @@ class FeatureProcessor:
         self.timesteps = timesteps
         self.feature_config = feature_config
         self.digits = ["as", "kop", "kepala", "ekor"]
+        self.cb_target_cols = [f'cb_target_{i}' for i in range(10)]
         self.feature_names = []
 
     def _calculate_streak(self, series):
@@ -92,6 +94,9 @@ class FeatureProcessor:
         df['date'] = pd.to_datetime(df['date'])
         for i, digit in enumerate(self.digits):
             df[digit] = df["result"].str[i].astype('int8')
+        
+        for i in range(10):
+            df[f'cb_target_{i}'] = df['result'].str.contains(str(i)).astype(int)
         
         new_features = {}
         digit_cols = df[self.digits]
@@ -125,17 +130,17 @@ class FeatureProcessor:
                 new_features[f'{d}_lag_{i}'] = df[d].shift(i)
         df_features = pd.DataFrame(new_features, index=df.index)
         training_df = pd.concat([df, df_features], axis=1)
-        self.feature_names = [col for col in training_df.columns if col not in ['date', 'result'] + self.digits]
         
-        # UPDATED: Ganti NaN dengan 0 setelah dropna awal untuk memastikan data fitur bersih
+        self.feature_names = [col for col in training_df.columns if col not in ['date', 'result'] + self.digits + self.cb_target_cols]
+        
+        training_df.dropna(subset=self.feature_names + self.digits, inplace=True)
         training_df[self.feature_names] = training_df[self.feature_names].fillna(0)
         
-        training_df.dropna(subset=self.digits, inplace=True)
         return training_df
 
     def transform_for_prediction(self, historical_df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
         if len(historical_df) < self.timesteps:
-            raise PredictionError(f"Data historis tidak cukup ({len(historical_df)} baris) untuk membuat prediksi dengan {self.timesteps} timesteps.")
+            raise PredictionError(f"Data historis tidak cukup ({len(historical_df)} baris) untuk membuat prediksi.")
         last_known_data = historical_df.iloc[-self.timesteps:].copy()
         for i, digit in enumerate(self.digits):
             last_known_data[digit] = last_known_data["result"].str[i].astype('int8')
@@ -173,7 +178,6 @@ class FeatureProcessor:
                 pred_vector[f'{d}_lag_{i}'] = last_known_data[d].iloc[-i]
         
         df_pred = pd.DataFrame([pred_vector])
-        # UPDATED: Ganti NaN dengan 0 untuk memastikan data prediksi bersih
         return df_pred.fillna(0)
 
 class ModelTrainer:
@@ -217,6 +221,24 @@ class ModelTrainer:
         except Exception as e:
             logger.error(f"Error training model untuk digit {digit}: {e}", exc_info=True)
             return None, None, None, None
+    
+    @error_handler(logger)
+    def train_cb_digit_model(self, X_full, y_full, digit, sample_weights=None):
+        try:
+            model = xgb.XGBClassifier(**self.training_params) # Use passed params
+            
+            if 'scale_pos_weight' not in self.training_params:
+                scale_pos_weight = (y_full == 0).sum() / (y_full == 1).sum() if (y_full == 1).sum() > 0 else 1
+                model.set_params(scale_pos_weight=scale_pos_weight)
+
+            logger.info(f"Training CB model untuk digit '{digit}'.")
+            
+            model.fit(X_full, y_full, eval_set=[(X_full, y_full)], verbose=False, sample_weight=sample_weights)
+            
+            return model
+        except Exception as e:
+            logger.error(f"Error training CB model untuk digit {digit}: {e}", exc_info=True)
+            return None
 
 class ModelPredictor:
     def __init__(self, pasaran: str):
@@ -227,21 +249,24 @@ class ModelPredictor:
         self.data_manager = DataManager(pasaran)
         self.feature_processor = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
         self.continual_learner = ContinualLearner(self)
+        
         self.models: Dict[str, Optional[xgb.XGBClassifier]] = {d: None for d in self.digits}
+        self.cb_models: Dict[str, Optional[xgb.XGBClassifier]] = {str(i): None for i in range(10)}
         self.rf_models: Dict[str, Optional[RandomForestClassifier]] = {d: None for d in self.digits}
         self.lgbm_models: Dict[str, Optional[lgb.LGBMClassifier]] = {d: None for d in self.digits}
         self.label_encoders: Dict[str, Optional[LabelEncoder]] = {d: None for d in self.digits}
         self.feature_names: Optional[List[str]] = None
+        
         try:
             self.data_manager.get_data()
         except DataFetchingError as e:
-            logger.warning(f"Gagal memuat data awal untuk {self.pasaran}, mungkin perlu training: {e}")
+            logger.warning(f"Gagal memuat data awal untuk {self.pasaran}: {e}")
         self.models_ready = self.load_models()
 
     def _get_config(self) -> Dict[str, Any]:
         market_config = MARKET_CONFIGS.get(self.pasaran)
         if not market_config:
-            raise KeyError(f"Konfigurasi untuk pasaran '{self.pasaran}' tidak ditemukan di MARKET_CONFIGS.")
+            raise KeyError(f"Konfigurasi untuk pasaran '{self.pasaran}' tidak ditemukan.")
         
         config = market_config.copy()
         config["training_params"] = TRAINING_CONFIG_OPTIONS.get('OPTIMIZED')
@@ -249,16 +274,13 @@ class ModelPredictor:
 
     @error_handler(logger)
     def load_models(self) -> bool:
-        if not os.path.exists(self.model_dir_base):
-            logger.info(f"Direktori model untuk {self.pasaran} tidak ditemukan.")
-            return False
+        if not os.path.exists(self.model_dir_base): return False
         features_path = os.path.join(self.model_dir_base, "features.pkl")
-        if os.path.exists(features_path):
-            self.feature_names = joblib.load(features_path)
-        else:
-            logger.warning("File 'features.pkl' tidak ditemukan.")
-            return False
-        xgb_loaded, rf_loaded, lgbm_loaded = 0, 0, 0
+        if not os.path.exists(features_path): return False
+            
+        self.feature_names = joblib.load(features_path)
+        
+        xgb_loaded, cb_loaded = 0, 0
         for d in self.digits:
             model_path = os.path.join(self.model_dir_base, f"model_{d}.pkl")
             if os.path.exists(model_path):
@@ -267,134 +289,112 @@ class ModelPredictor:
             encoder_path = os.path.join(self.model_dir_base, f"encoder_{d}.pkl")
             if os.path.exists(encoder_path):
                 self.label_encoders[d] = joblib.load(encoder_path)
-            if ENSEMBLE_CONFIG.get("USE_ENSEMBLE"):
-                rf_path = os.path.join(self.model_dir_base, f"rf_model_{d}.pkl")
-                if os.path.exists(rf_path):
-                    self.rf_models[d] = joblib.load(rf_path)
-                    rf_loaded += 1
-                lgbm_path = os.path.join(self.model_dir_base, f"lgbm_model_{d}.pkl")
-                if os.path.exists(lgbm_path):
-                    self.lgbm_models[d] = joblib.load(lgbm_path)
-                    lgbm_loaded += 1
-        logger.info(f"Model loaded: XGB({xgb_loaded}/{len(self.digits)}), RF({rf_loaded}/{len(self.digits)}), LGBM({lgbm_loaded}/{len(self.digits)})")
-        return xgb_loaded == len(self.digits)
+        
+        for i in range(10):
+            cb_model_path = os.path.join(self.model_dir_base, f"model_cb_{i}.pkl")
+            if os.path.exists(cb_model_path):
+                self.cb_models[str(i)] = joblib.load(cb_model_path)
+                cb_loaded += 1
+        
+        logger.info(f"Model loaded: 4D_XGB({xgb_loaded}/{len(self.digits)}), CB_XGB({cb_loaded}/10)")
+        return xgb_loaded == len(self.digits) and cb_loaded == 10
 
     @error_handler(logger)
     def train_model(self, training_mode: str = 'OPTIMIZED', use_recency_bias: bool = True, custom_data: Optional[pd.DataFrame] = None) -> bool:
-        logger.info(f"Memulai training untuk {self.pasaran} mode {training_mode}. Recency Bias: {use_recency_bias}")
+        logger.info(f"Memulai training untuk {self.pasaran} mode {training_mode}.")
         
-        if training_mode == 'AUTO':
-            missing_files = []
-            for digit in self.digits:
-                best_params_path = os.path.join(self.model_dir_base, f"best_params_{digit}.json")
-                if not os.path.exists(best_params_path):
-                    missing_files.append(f"best_params_{digit}.json")
-            if missing_files:
-                raise TrainingError(
-                    f"Mode 'Gunakan Hasil Optimasi' (AUTO) gagal: File {', '.join(missing_files)} tidak ditemukan. "
-                    "Harap jalankan proses Optimasi terlebih dahulu."
-                )
-
         os.makedirs(self.model_dir_base, exist_ok=True)
-        
-        force_fresh_training = False
-        features_path = os.path.join(self.model_dir_base, "features.pkl")
-        old_feature_names = None
-        if os.path.exists(features_path):
-            try:
-                old_feature_names = joblib.load(features_path)
-            except Exception as e:
-                logger.warning(f"Gagal memuat file fitur lama: {e}. Training dari awal akan dipaksa.")
-                force_fresh_training = True
-
-        df_full = custom_data if custom_data is not None and not custom_data.empty else self.data_manager.get_data(force_refresh=True, force_github=True)
+        df_full = custom_data if custom_data is not None else self.data_manager.get_data(force_refresh=True, force_github=True)
         training_df = self.feature_processor.fit_transform(df_full)
         self.feature_names = self.feature_processor.feature_names
         
-        if not force_fresh_training and old_feature_names is not None and set(old_feature_names) != set(self.feature_names):
-            force_fresh_training = True
-            logger.warning("Perubahan skema fitur terdeteksi. Training akan dipaksa berjalan dari awal (tanpa warm start).")
-
         min_samples = self.config["strategy"]["min_training_samples"]
         if len(training_df) < min_samples:
-            raise TrainingError(f"Data tidak cukup untuk training setelah diproses. Perlu {min_samples}, tersedia {len(training_df)}.")
-        joblib.dump(self.feature_names, features_path)
-        logger.info(f"Menyimpan {len(self.feature_names)} nama fitur ke {features_path}.")
+            raise TrainingError(f"Data tidak cukup untuk training. Perlu {min_samples}, tersedia {len(training_df)}.")
+        
+        joblib.dump(self.feature_names, os.path.join(self.model_dir_base, "features.pkl"))
         
         sample_weights = None
         if use_recency_bias and ADAPTIVE_LEARNING_CONFIG["USE_RECENCY_WEIGHTING"]:
             days_since_latest = (training_df['date'].max() - training_df['date']).dt.days
-            half_life = ADAPTIVE_LEARNING_CONFIG["RECENCY_HALF_LIFE_DAYS"]
-            decay_rate = np.log(2) / half_life
-            weights = np.exp(-decay_rate * days_since_latest)
-            sample_weights = pd.Series(weights, index=training_df.index)
+            decay_rate = np.log(2) / ADAPTIVE_LEARNING_CONFIG["RECENCY_HALF_LIFE_DAYS"]
+            sample_weights = pd.Series(np.exp(-decay_rate * days_since_latest), index=training_df.index)
 
+        X_full = training_df[self.feature_names]
+
+        logger.info("--- Memulai Training Model 4D ---")
         for digit in self.digits:
+            training_params = {}
             if training_mode == 'AUTO':
                 best_params_path = os.path.join(self.model_dir_base, f"best_params_{digit}.json")
-                with open(best_params_path, 'r') as f:
-                    training_params = json.load(f)
+                if os.path.exists(best_params_path):
+                    logger.info(f"Mode AUTO: Menggunakan parameter hasil tuning untuk 4D-{digit}.")
+                    with open(best_params_path, 'r') as f:
+                        training_params = json.load(f)
+                else:
+                    logger.warning(f"Mode AUTO: File best_params_{digit}.json tidak ditemukan. Fallback ke mode OPTIMIZED.")
+                    training_params = TRAINING_CONFIG_OPTIONS['OPTIMIZED'].get("xgb_params", {}).get(digit, {})
             else:
                 config_options = TRAINING_CONFIG_OPTIONS.get(training_mode, TRAINING_CONFIG_OPTIONS['OPTIMIZED'])
                 training_params = config_options.get("xgb_params", {}).get(digit, {})
 
             model_trainer = ModelTrainer(self.digits, training_params, self.pasaran)
             y_full = training_df[digit]
-            X_full = training_df[self.feature_names]
-
             if y_full.nunique() < 2: continue
             
-            existing_model = self.models.get(digit) if self.models_ready and not force_fresh_training else None
-            
-            model, le, importance, y_encoded = model_trainer.train_digit_model(
-                X_full, y_full, digit,
-                existing_model=existing_model,
-                sample_weights=sample_weights
-            )
+            model, le, importance, _ = model_trainer.train_digit_model(X_full, y_full, digit, sample_weights=sample_weights)
             if model and le and importance:
                 joblib.dump(model, os.path.join(self.model_dir_base, f"model_{digit}.pkl"))
                 joblib.dump(le, os.path.join(self.model_dir_base, f"encoder_{digit}.pkl"))
                 pd.DataFrame(importance.items(), columns=['feature', 'weight']).sort_values('weight', ascending=False).to_csv(os.path.join(self.model_dir_base, f"feature_importance_{digit}.csv"), index=False)
-                if ENSEMBLE_CONFIG.get("USE_ENSEMBLE"):
-                    train_ensemble_models(
-                        X=X_full,
-                        y_encoded=y_encoded,
-                        model_dir_base=self.model_dir_base,
-                        digit=digit
-                    )
                 self._check_for_drift(digit)
+
+        logger.info("--- Memulai Training Model Colok Bebas (CB) ---")
+        for i in range(10):
+            digit = str(i)
+            cb_params = {}
+            if training_mode == 'AUTO':
+                best_params_path = os.path.join(self.model_dir_base, f"best_params_cb_{digit}.json")
+                if os.path.exists(best_params_path):
+                    logger.info(f"Mode AUTO: Menggunakan parameter hasil tuning untuk CB-{digit}.")
+                    with open(best_params_path, 'r') as f:
+                        cb_params = json.load(f)
+                else:
+                    logger.warning(f"Mode AUTO: File best_params_cb_{digit}.json tidak ditemukan. Fallback ke parameter default.")
+                    cb_params = XGB_PARAMS_CB
+            else:
+                cb_params = XGB_PARAMS_CB
+
+            cb_trainer = ModelTrainer(self.digits, cb_params, self.pasaran)
+            y_cb = training_df[f'cb_target_{digit}']
+            if y_cb.nunique() < 2: continue
+            
+            cb_model = cb_trainer.train_cb_digit_model(X_full, y_cb, digit, sample_weights=sample_weights)
+            if cb_model:
+                joblib.dump(cb_model, os.path.join(self.model_dir_base, f"model_cb_{digit}.pkl"))
+
         self.models_ready = self.load_models()
         return self.models_ready
 
-    def _determine_colok_bebas(self, all_probas: Dict[str, np.ndarray], encoders: Dict[str, LabelEncoder]) -> str:
-        """
-        Menentukan kandidat Colok Bebas terbaik berdasarkan total probabilitas gabungan
-        dari semua posisi (AS, KOP, KEPALA, EKOR).
-        """
+    def _determine_colok_bebas_dedicated(self, latest_features: pd.DataFrame) -> str:
+        cb_probas = {}
+        for i in range(10):
+            model = self.cb_models.get(str(i))
+            if model:
+                proba = model.predict_proba(latest_features)[0][1]
+                cb_probas[str(i)] = proba
+        return max(cb_probas, key=cb_probas.get) if cb_probas else ""
+
+    def _determine_colok_bebas_aggregated(self, all_4d_probas: Dict[str, np.ndarray]) -> str:
         total_probs = {str(i): 0.0 for i in range(10)}
-
-        for digit_pos, probabilities in all_probas.items():
-            encoder = encoders.get(digit_pos)
-            if not encoder:
-                logger.warning(f"Encoder untuk {digit_pos} tidak ditemukan. Skipping.")
-                continue
-            
-            if len(encoder.classes_) != len(probabilities):
-                logger.warning(f"Mismatch antara encoder ({len(encoder.classes_)}) dan probabilitas ({len(probabilities)}) untuk {digit_pos}. Skipping.")
-                continue
-
+        for digit_pos, probabilities in all_4d_probas.items():
+            encoder = self.label_encoders.get(digit_pos)
+            if not encoder: continue
             for i, class_label in enumerate(encoder.classes_):
                 total_probs[str(class_label)] += probabilities[i]
-        
-        if not total_probs or all(p == 0.0 for p in total_probs.values()):
-            logger.warning("Tidak dapat menentukan Colok Bebas, tidak ada data probabilitas.")
-            return ""
-            
-        best_digit = max(total_probs, key=total_probs.get)
-        return best_digit
+        return max(total_probs, key=total_probs.get) if any(p > 0 for p in total_probs.values()) else ""
 
     def _determine_angka_main(self, predictions: Dict[str, List[str]]) -> List[str]:
-        """Menyusun 4 digit Angka Main dari kandidat teratas."""
         am_candidates = OrderedDict()
         am_candidates[predictions['as'][0]] = None
         am_candidates[predictions['kop'][0]] = None
@@ -417,63 +417,35 @@ class ModelPredictor:
     def predict_next_day(self, target_date_str: Optional[str] = None, for_evaluation: bool = False) -> Dict[str, Any]:
         if not self.models_ready:
             raise PredictionError("Model tidak siap. Silakan jalankan training.")
+        
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
         base_df = self.data_manager.get_data()
-        historical_data = base_df.copy()
-        for i, digit in enumerate(self.digits):
-            historical_data[digit] = historical_data["result"].str[i].astype('int8')
         latest_features = self.feature_processor.transform_for_prediction(base_df, target_date)
         latest_features = latest_features.reindex(columns=self.feature_names, fill_value=0)
         
         predictions = {}
-        all_probas_for_eval = {}
-        
-        scoring_config = HYBRID_SCORING_CONFIG
-        use_hybrid_scoring = scoring_config.get("ENABLED", False)
-        ai_weight = scoring_config.get("AI_SCORE_WEIGHT", 0.8)
-        hist_weight = scoring_config.get("HISTORICAL_SCORE_WEIGHT", 0.2)
-        
+        all_4d_probas = {}
         for d in self.digits:
             encoder = self.label_encoders[d]
-            if not encoder: raise PredictionError(f"Encoder untuk digit '{d}' tidak tersedia.")
-            current_models = {'xgb': self.models.get(d)}
-            if ENSEMBLE_CONFIG.get("USE_ENSEMBLE"):
-                current_models['rf'] = self.rf_models.get(d)
-                current_models['lgbm'] = self.lgbm_models.get(d)
+            if not encoder: raise PredictionError(f"Encoder untuk '{d}' tidak tersedia.")
             
-            try:
-                raw_probabilities = ensemble_predict_proba(current_models, latest_features)[0]
-            except ValueError as e:
-                if "Tidak ada model yang berhasil memberikan prediksi" in str(e):
-                    raise PredictionError(
-                        "Semua model yang dimuat tidak sesuai dengan set fitur saat ini. "
-                        "Harap jalankan kembali proses training untuk memperbarui model."
-                    )
-                else:
-                    raise e
-
-            if use_hybrid_scoring:
-                ai_scores = raw_probabilities
-                historical_freq = historical_data[d].value_counts(normalize=True)
-                hist_scores_series = pd.Series(index=encoder.classes_).fillna(0)
-                hist_scores_series.update(historical_freq)
-                if not hist_scores_series.empty and hist_scores_series.max() > 0:
-                   hist_scores_series = hist_scores_series / hist_scores_series.max()
-                hist_scores = hist_scores_series.values
-                final_scores = (ai_scores * ai_weight) + (hist_scores * hist_weight)
-            else:
-                final_scores = raw_probabilities
-            
-            all_probas_for_eval[d] = final_scores
-            top_indices = np.argsort(final_scores)[::-1]
-            
+            raw_probabilities = self.models[d].predict_proba(latest_features)[0]
+            all_4d_probas[d] = raw_probabilities
+            top_indices = np.argsort(raw_probabilities)[::-1]
             top_three_digits = encoder.inverse_transform(top_indices[:3])
             predictions[d] = [str(digit) for digit in top_three_digits]
 
-        colok_bebas = self._determine_colok_bebas(all_probas_for_eval, self.label_encoders)
+        strategy = CB_STRATEGY_CONFIG.get(self.pasaran, "dedicated")
+        logger.info(f"Menggunakan strategi CB '{strategy}' untuk pasaran {self.pasaran}.")
+
+        if strategy == "aggregated":
+            colok_bebas = self._determine_colok_bebas_aggregated(all_4d_probas)
+        else:
+            colok_bebas = self._determine_colok_bebas_dedicated(latest_features)
+        
         angka_main = self._determine_angka_main(predictions)
 
-        result = {
+        return {
             "prediction_date": target_date.strftime("%Y-%m-%d"),
             "final_4d_prediction": f"{predictions['as'][0]}{predictions['kop'][0]}{predictions['kepala'][0]}{predictions['ekor'][0]}",
             "kandidat_as": ", ".join(predictions['as']),
@@ -483,11 +455,6 @@ class ModelPredictor:
             "angka_main": ", ".join(angka_main),
             "colok_bebas": colok_bebas
         }
-        
-        if for_evaluation:
-            result["probabilities"] = all_probas_for_eval
-            result["label_encoders"] = self.label_encoders
-        return result
     
     @error_handler(drift_logger)
     def evaluate_performance(self, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
@@ -495,25 +462,11 @@ class ModelPredictor:
         eval_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
         if eval_df.empty: return {"summary": {"error": "Tidak ada data pada periode yang diminta"}, "results": []}
         results_list = []
-        prob_metrics = {d: {'y_true': [], 'y_prob': [], 'y_true_label': [], 'y_prob_max': []} for d in self.digits}
         for _, row in eval_df.iterrows():
             try:
                 pred_result = self.predict_next_day(row['date'].strftime('%Y-%m-%d'), for_evaluation=True)
                 actual_result = row['result']
                 if pred_result and actual_result:
-                    for i, d in enumerate(self.digits):
-                        actual_digit = int(actual_result[i])
-                        le = pred_result['label_encoders'][d]
-                        if actual_digit in le.classes_:
-                            y_true_one_hot = np.zeros(len(le.classes_))
-                            class_index = np.where(le.classes_ == actual_digit)[0][0]
-                            y_true_one_hot[class_index] = 1
-                            prob_metrics[d]['y_true'].append(y_true_one_hot)
-                            prob_metrics[d]['y_prob'].append(pred_result['probabilities'][d])
-                            prob_metrics[d]['y_true_label'].append(class_index)
-                            prob_metrics[d]['y_prob_max'].append(pred_result['probabilities'][d].max())
-                    del pred_result['probabilities']
-                    del pred_result['label_encoders']
                     results_list.append({ "date": row['date'].strftime('%Y-%m-%d'), "actual": actual_result, **pred_result })
             except PredictionError as e:
                 logger.warning(f"Skipping evaluasi untuk {row['date'].strftime('%Y-%m-%d')}: {e}")
@@ -528,17 +481,11 @@ class ModelPredictor:
         def check_cb(a, p): return p in a if isinstance(p, str) and a else False
         am_accuracy = eval_summary_df.apply(lambda r: check_am(r['actual'], r['angka_main']), axis=1).mean()
         cb_accuracy = eval_summary_df.apply(lambda r: check_cb(r['actual'], r['colok_bebas']), axis=1).mean()
-        brier_scores, calib_errors = [], []
-        for d in self.digits:
-            if prob_metrics[d]['y_true']:
-                brier_scores.append(calculate_brier_score(np.array(prob_metrics[d]['y_true']), np.array(prob_metrics[d]['y_prob'])))
-                calib_errors.append(calculate_ece(np.array(prob_metrics[d]['y_true_label']), np.array(prob_metrics[d]['y_prob_max']), np.array(prob_metrics[d]['y_prob'])))
+        
         summary = {
             "total_days_evaluated": len(eval_summary_df),
             "as_accuracy": as_accuracy, "kop_accuracy": kop_accuracy, "kepala_accuracy": kepala_accuracy, "ekor_accuracy": ekor_accuracy,
             "am_accuracy": am_accuracy, "cb_accuracy": cb_accuracy,
-            "avg_brier_score": np.mean(brier_scores) if brier_scores else -1,
-            "avg_calibration_error": np.mean(calib_errors) if calib_errors else -1,
             "retraining_recommended": False, "retraining_reason": "N/A"
         }
         if (summary["kepala_accuracy"] < ACCURACY_THRESHOLD_FOR_RETRAIN or summary["ekor_accuracy"] < ACCURACY_THRESHOLD_FOR_RETRAIN):

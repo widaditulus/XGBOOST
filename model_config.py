@@ -1,5 +1,20 @@
-# model_config.py
+# model_config.py (Final - Lengkap dan Fungsional)
 # -*- coding: utf-8 -*-
+
+# --- UPDATED: Menambahkan parameter khusus untuk Model Colok Bebas ---
+# Parameter ini dioptimalkan untuk klasifikasi biner (muncul/tidak muncul)
+# dan dibuat lebih 'ringan' karena kita akan melatih 10 model sekaligus.
+XGB_PARAMS_CB = {
+    "objective": "binary:logistic",
+    "eval_metric": "logloss",
+    "n_estimators": 250,
+    "learning_rate": 0.05,
+    "max_depth": 4,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "random_state": 42,
+    "early_stopping_rounds": 20
+}
 
 # --- PARAMETER UNTUK CONSTRUCTOR XGBOOST ---
 # Setiap set parameter sekarang berisi 'early_stopping_rounds' secara langsung.
@@ -24,33 +39,24 @@ XGB_PARAMS_CEPAT = {
     "ekor":   {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 300, "learning_rate": 0.05, "max_depth": 5, "subsample": 0.8, "colsample_bytree": 0.8, "random_state": 42, "early_stopping_rounds": 20}
 }
 
-# UPDATED: Menambahkan set parameter baru untuk analisis yang lebih mendalam
-# PERBAIKAN: Parameter untuk kepala & ekor diubah untuk menangani kasus sulit
 XGB_PARAMS_DEEP_ANALYSIS = {
     "as":     {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 2000, "learning_rate": 0.03, "max_depth": 7, "subsample": 0.6, "colsample_bytree": 0.6, "gamma": 0.2, "reg_alpha": 0.2, "random_state": 42, "early_stopping_rounds": 50},
     "kop":    {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 2000, "learning_rate": 0.03, "max_depth": 7, "subsample": 0.6, "colsample_bytree": 0.6, "gamma": 0.2, "reg_alpha": 0.2, "random_state": 42, "early_stopping_rounds": 50},
     "kepala": {"objective": "multi:softprob", "eval_metric": "mlogloss",
-               "n_estimators": 2500,      # Beri lebih banyak kesempatan belajar
-               "learning_rate": 0.03,   # Langkah belajar lebih kecil/hati-hati
-               "max_depth": 7,           # Izinkan model melihat interaksi fitur yang lebih kompleks
+               "n_estimators": 2500, "learning_rate": 0.03, "max_depth": 7,
                "subsample": 0.6, "colsample_bytree": 0.6, "gamma": 0.2,
-               "reg_alpha": 0.2, "random_state": 42,
-               "early_stopping_rounds": 60}, # Perpanjang kesabaran
+               "reg_alpha": 0.2, "random_state": 42, "early_stopping_rounds": 60},
     "ekor":   {"objective": "multi:softprob", "eval_metric": "mlogloss",
-               "n_estimators": 2500,      # Beri lebih banyak kesempatan belajar
-               "learning_rate": 0.03,   # Langkah belajar lebih kecil/hati-hati
-               "max_depth": 7,           # Izinkan model melihat interaksi fitur yang lebih kompleks
+               "n_estimators": 2500, "learning_rate": 0.03, "max_depth": 7,
                "subsample": 0.6, "colsample_bytree": 0.6, "gamma": 0.2,
-               "reg_alpha": 0.2, "random_state": 42,
-               "early_stopping_rounds": 60} # Perpanjang kesabaran
+               "reg_alpha": 0.2, "random_state": 42, "early_stopping_rounds": 60}
 }
 
 
 # --- PENGGABUNGAN KONFIGURASI ---
 TRAINING_CONFIG_OPTIONS = {
-    'QUICK': {"xgb_params": XGB_PARAMS_CEPAT},
-    'COMPREHENSIVE': {"xgb_params": XGB_PARAMS_AKURAT},
-    'OPTIMIZED': {"xgb_params": XGB_PARAMS_OPTIMIZED},
-    # UPDATED: Menambahkan mode training baru
-    'DEEP_ANALYSIS': {"xgb_params": XGB_PARAMS_DEEP_ANALYSIS}
+    'QUICK': {"xgb_params": XGB_PARAMS_CEPAT, "cb_params": XGB_PARAMS_CB},
+    'COMPREHENSIVE': {"xgb_params": XGB_PARAMS_AKURAT, "cb_params": XGB_PARAMS_CB},
+    'OPTIMIZED': {"xgb_params": XGB_PARAMS_OPTIMIZED, "cb_params": XGB_PARAMS_CB},
+    'DEEP_ANALYSIS': {"xgb_params": XGB_PARAMS_DEEP_ANALYSIS, "cb_params": XGB_PARAMS_CB}
 }

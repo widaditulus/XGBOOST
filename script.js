@@ -1,4 +1,4 @@
-// script.js (Final - Lengkap dan Fungsional)
+// script.js (Final - Dengan Monitoring Tuning CB)
 
 document.addEventListener('DOMContentLoaded', function() {
     let currentPasaran = document.getElementById('pasaranSelect').value;
@@ -6,8 +6,8 @@ document.addEventListener('DOMContentLoaded', function() {
     let evaluationInterval = null;
     let updateInterval = null; 
     let tuningInterval = null;
+    let cbTuningInterval = null; // Interval baru untuk CB Tuning
     const charts = {};
-    const notifiedAutoMode = new Set(); // REVISI FINAL: Lacak notifikasi per pasaran
 
     const ui = {
         pasaranSelect: document.getElementById('pasaranSelect'),
@@ -32,6 +32,7 @@ document.addEventListener('DOMContentLoaded', function() {
         trainingProgress: document.querySelector('.progress'),
         trainingProgressBar: document.getElementById('trainingProgressBar'),
         startTuningBtn: document.getElementById('startTuningBtn'),
+        startCbTuningBtn: document.getElementById('startCbTuningBtn'), // Tombol baru
         tuningActivityStatus: document.getElementById('tuningActivityStatus'),
         
         healthTab: document.getElementById('health-tab'),
@@ -82,24 +83,6 @@ document.addEventListener('DOMContentLoaded', function() {
             showAlert(error.message, 'danger');
             return null;
         }
-    }
-
-    function checkAutoModeAvailability() {
-        if (!currentPasaran) return;
-        const autoOption = ui.trainingMode.querySelector('option[value="AUTO"]');
-        if (!autoOption) return;
-
-        fetchData(`/check-optimized-params/${currentPasaran}`).then(data => {
-            if (data) {
-                autoOption.disabled = !data.available;
-                if (data.available && !notifiedAutoMode.has(currentPasaran)) { // REVISI FINAL
-                    showAlert(`Mode 'Gunakan Hasil Optimasi' tersedia untuk ${currentPasaran.toUpperCase()}.`, 'info');
-                    notifiedAutoMode.add(currentPasaran); // REVISI FINAL
-                } else if (!data.available && ui.trainingMode.value === "AUTO") {
-                    ui.trainingMode.value = "OPTIMIZED";
-                }
-            }
-        });
     }
 
     function updateActivePasaranDisplay() {
@@ -245,14 +228,12 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     function startTuning() {
-        if (!confirm("Proses optimasi akan memakan waktu lama (bisa lebih dari 1 jam) dan akan sangat membebani CPU. Lanjutkan?")) {
+        if (!confirm("Proses optimasi 4D akan memakan waktu lama dan sangat membebani CPU. Lanjutkan?")) {
             return;
         }
         const btn = ui.startTuningBtn;
-        btn.dataset.originalText = btn.innerHTML;
         btn.disabled = true;
-        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
-        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Memulai proses optimasi...`;
+        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Memulai optimasi 4D...`;
         
         const formData = new FormData();
         formData.append('pasaran', currentPasaran);
@@ -263,16 +244,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 monitorTuningStatus();
             } else {
                 btn.disabled = false;
-                btn.innerHTML = btn.dataset.originalText;
-                ui.tuningActivityStatus.textContent = 'Gagal memulai optimasi';
-                showAlert(data?.message || 'Gagal memulai optimasi', 'danger');
+                ui.tuningActivityStatus.textContent = 'Gagal memulai optimasi 4D';
+                showAlert(data?.message || 'Gagal memulai optimasi 4D', 'danger');
             }
         });
     }
 
     function monitorTuningStatus() {
         if (tuningInterval) clearInterval(tuningInterval);
-        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Optimasi sedang berjalan...`;
+        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Optimasi 4D berjalan...`;
         tuningInterval = setInterval(() => {
             fetchData(`/tuning-status?pasaran=${currentPasaran}`).then(data => {
                 if (!data) { clearInterval(tuningInterval); return; }
@@ -282,16 +262,54 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (data.status === 'completed' || data.status === 'failed') {
                     clearInterval(tuningInterval);
                     ui.startTuningBtn.disabled = false;
-                    ui.startTuningBtn.innerHTML = ui.startTuningBtn.dataset.originalText || '<i class="fas fa-magic"></i> Optimasi';
+                    ui.tuningActivityStatus.innerHTML = (data.status === 'completed') ? 
+                        `<i class="fas fa-check-circle me-2 text-success"></i>${data.message}` : 
+                        `<i class="fas fa-exclamation-triangle me-2 text-danger"></i>Error: ${data.message}`;
+                    showAlert(data.message, data.status === 'completed' ? 'success' : 'danger');
+                }
+            });
+        }, 5000);
+    }
 
-                    if (data.status === 'completed') {
-                        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-check-circle me-2 text-success"></i>${data.message}`;
-                        showAlert('Optimasi parameter selesai!', 'success');
-                        checkAutoModeAvailability();
-                    } else {
-                        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-exclamation-triangle me-2 text-danger"></i>Error: ${data.message}`;
-                        showAlert('Optimasi parameter gagal!', 'danger');
-                    }
+    function startCbTuning() {
+        if (!confirm("Proses optimasi CB akan memakan waktu lama (bisa lebih dari 1 jam) dan sangat membebani CPU. Lanjutkan?")) {
+            return;
+        }
+        const btn = ui.startCbTuningBtn;
+        btn.disabled = true;
+        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Memulai optimasi CB...`;
+        
+        const formData = new FormData();
+        formData.append('pasaran', currentPasaran);
+        
+        fetchData('/start-tuning-cb', { method: 'POST', body: formData }).then(data => {
+            if (data?.status === 'success') {
+                showAlert(data.message, 'info');
+                monitorCbTuningStatus();
+            } else {
+                btn.disabled = false;
+                ui.tuningActivityStatus.textContent = 'Gagal memulai optimasi CB';
+                showAlert(data?.message || 'Gagal memulai optimasi CB', 'danger');
+            }
+        });
+    }
+
+    function monitorCbTuningStatus() {
+        if (cbTuningInterval) clearInterval(cbTuningInterval);
+        ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>Optimasi CB berjalan...`;
+        cbTuningInterval = setInterval(() => {
+            fetchData(`/cb-tuning-status?pasaran=${currentPasaran}`).then(data => {
+                if (!data) { clearInterval(cbTuningInterval); return; }
+                
+                ui.tuningActivityStatus.innerHTML = `<i class="fas fa-sync-alt fa-spin me-2"></i>${data.message}`;
+
+                if (data.status === 'completed' || data.status === 'failed') {
+                    clearInterval(cbTuningInterval);
+                    ui.startCbTuningBtn.disabled = false;
+                    ui.tuningActivityStatus.innerHTML = (data.status === 'completed') ? 
+                        `<i class="fas fa-check-circle me-2 text-success"></i>${data.message}` : 
+                        `<i class="fas fa-exclamation-triangle me-2 text-danger"></i>Error: ${data.message}`;
+                    showAlert(data.message, data.status === 'completed' ? 'success' : 'danger');
                 }
             });
         }, 5000);
@@ -426,12 +444,12 @@ document.addEventListener('DOMContentLoaded', function() {
             updateSystemStatus();
             updateActivePasaranDisplay();
             ui.predictionDisplay.style.display = 'none';
-            checkAutoModeAvailability();
         });
         ui.predictBtn.addEventListener('click', getPrediction);
         ui.startTrainingBtn.addEventListener('click', startTraining);
         ui.updateDataBtn.addEventListener('click', startUpdateData);
         ui.startTuningBtn.addEventListener('click', startTuning);
+        ui.startCbTuningBtn.addEventListener('click', startCbTuning);
         
         ui.startEvaluationBtn.addEventListener('click', startEvaluation);
         ui.evaluationTab.addEventListener('shown.bs.tab', updateActivePasaranDisplay);
@@ -456,7 +474,6 @@ document.addEventListener('DOMContentLoaded', function() {
         
         updateSystemStatus();
         updateActivePasaranDisplay();
-        checkAutoModeAvailability();
     }
     
     initializeApp();
