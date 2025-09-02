@@ -64,6 +64,18 @@ def get_predictor(pasaran: str) -> ModelPredictor:
 def index():
     return render_template('index.html', pasaran_list=PASARAN_LIST, display_mapping=PASARAN_DISPLAY_MAPPING)
 
+# UPDATED: Endpoint baru untuk memeriksa kesegaran data
+@app.route('/data-status/<pasaran>')
+@validate_pasaran
+def data_status(pasaran):
+    try:
+        predictor = get_predictor(pasaran)
+        status = predictor.data_manager.check_data_freshness()
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Gagal memeriksa status data untuk {pasaran}: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @app.route('/start-training', methods=['POST'])
 @validate_pasaran
 def start_training(pasaran):

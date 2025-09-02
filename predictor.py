@@ -70,6 +70,37 @@ class DataManager:
                 self.df = df_sorted
             return self.df.copy()
 
+    # UPDATED: Metode baru untuk memeriksa kesegaran data antara lokal dan remote
+    @error_handler(logger)
+    def check_data_freshness(self) -> Dict[str, Any]:
+        """Membandingkan tanggal data terbaru dari DB lokal dan GitHub."""
+        local_df = self.get_data(force_refresh=False, force_github=False)
+        if local_df is None or local_df.empty:
+            return {"status": "stale", "message": "Data lokal tidak ditemukan."}
+
+        local_latest_date = local_df['date'].max()
+
+        try:
+            remote_df = self.fetcher.fetch_data(force_github=True)
+            if remote_df is None or remote_df.empty:
+                return {"status": "error", "message": "Gagal mengambil data remote."}
+            
+            remote_latest_date = self._validate_data(remote_df)['date'].max()
+
+            if local_latest_date < remote_latest_date:
+                status = "stale"
+            else:
+                status = "latest"
+
+            return {
+                "status": status,
+                "local_date": local_latest_date.strftime('%Y-%m-%d'),
+                "remote_date": remote_latest_date.strftime('%Y-%m-%d')
+            }
+        except Exception as e:
+            logger.error(f"Error saat memeriksa kesegaran data: {e}", exc_info=True)
+            return {"status": "error", "message": "Terjadi kesalahan saat perbandingan data."}
+
 class FeatureProcessor:
     def __init__(self, timesteps, feature_config):
         self.timesteps = timesteps

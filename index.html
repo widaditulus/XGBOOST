@@ -9,6 +9,12 @@
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+    <div id="loading-overlay">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+    </div>
+
     <div class="container py-4">
         <div class="text-center mb-4">
             <h1 class="display-4 fw-bold text-primary"><i class="fas fa-chart-line me-2"></i>Sistem XGBoost</h1>
@@ -86,7 +92,10 @@
                                 Prioritaskan Pola Terbaru (Recency Bias)
                             </label>
                         </div>
-                        <div id="dataInfo" class="mt-2 text-muted small"></div>
+                        <div id="dataInfo" class="mt-2 text-muted small">
+                            <span id="dataRowCount"></span>
+                            <span id="dataStatus" class="ms-2"></span>
+                        </div>
                     </div>
                 </div>
 

@@ -10,12 +10,15 @@ document.addEventListener('DOMContentLoaded', function() {
     const charts = {};
 
     const ui = {
+        loadingOverlay: document.getElementById('loading-overlay'),
         pasaranSelect: document.getElementById('pasaranSelect'),
         trainingMode: document.getElementById('trainingMode'),
         startTrainingBtn: document.getElementById('startTrainingBtn'),
         updateDataBtn: document.getElementById('updateDataBtn'),
         recencyBiasCheck: document.getElementById('recencyBiasCheck'),
         dataInfo: document.getElementById('dataInfo'),
+        dataRowCount: document.getElementById('dataRowCount'),
+        dataStatus: document.getElementById('dataStatus'),
         predictBtn: document.getElementById('predictBtn'),
         predictionDateInput: document.getElementById('predictionDate'),
         predictionDisplay: document.getElementById('prediction-display'),
@@ -91,6 +94,32 @@ document.addEventListener('DOMContentLoaded', function() {
         ui.activePasaranForHealth.textContent = pasaranDisplayName;
     }
 
+    // UPDATED: Menambahkan informasi tanggal pada status data
+    function checkDataStatus() {
+        if (!currentPasaran) return;
+        ui.dataStatus.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Memeriksa...`;
+        fetchData(`/data-status/${currentPasaran}`).then(data => {
+            if (!data || !data.status) {
+                ui.dataStatus.innerHTML = `<i class="fas fa-times-circle text-danger"></i> Gagal memeriksa.`;
+                return;
+            };
+
+            const btn = ui.updateDataBtn;
+            btn.classList.remove('btn-info', 'btn-success', 'btn-warning');
+
+            if (data.status === 'latest') {
+                ui.dataStatus.innerHTML = `<i class="fas fa-check-circle text-success"></i> Data Terbaru (s/d ${data.local_date})`;
+                btn.classList.add('btn-success');
+            } else if (data.status === 'stale') {
+                ui.dataStatus.innerHTML = `<i class="fas fa-exclamation-triangle text-warning"></i> Update Tersedia (Lokal s/d ${data.local_date})`;
+                btn.classList.add('btn-warning');
+            } else {
+                ui.dataStatus.innerHTML = `<i class="fas fa-times-circle text-danger"></i> Error: ${data.message || 'Tidak diketahui'}`;
+                btn.classList.add('btn-info');
+            }
+        });
+    }
+
     function updateSystemStatus() {
         if (!currentPasaran) return;
         fetchData(`/debug/model-status/${currentPasaran}`).then(data => {
@@ -98,10 +127,11 @@ document.addEventListener('DOMContentLoaded', function() {
             ui.modelStatus.innerHTML = data.models_ready ? 
                 `<span class="badge bg-success">Siap</span>` : 
                 `<span class="badge bg-danger">Perlu Training</span>`;
-            ui.dataInfo.innerHTML = data.data_manager_df_shape ? 
+            ui.dataRowCount.innerHTML = data.data_manager_df_shape ? 
                 `<i class="fas fa-database me-2"></i>${data.data_manager_df_shape[0]} baris data.` : 
                 `<i class="fas fa-exclamation-triangle me-2"></i>Data tidak ditemukan.`;
         });
+        checkDataStatus();
     }
 
     function getPrediction() {
@@ -438,7 +468,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    function initializeApp() {
+    async function initializeApp() {
         ui.pasaranSelect.addEventListener('change', () => {
             currentPasaran = ui.pasaranSelect.value;
             updateSystemStatus();
@@ -472,8 +502,9 @@ document.addEventListener('DOMContentLoaded', function() {
         ui.evalEndDate.value = yesterday.toISOString().split('T')[0];
         ui.evalStartDate.value = aMonthAgo.toISOString().split('T')[0];
         
-        updateSystemStatus();
+        await updateSystemStatus();
         updateActivePasaranDisplay();
+        ui.loadingOverlay.classList.add('hidden');
     }
     
     initializeApp();
