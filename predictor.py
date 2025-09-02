@@ -1,4 +1,4 @@
-# predictor.py
+# predictor.py (Final - Lengkap dan Fungsional)
 
 # -*- coding: utf-8 -*-
 import os
@@ -126,7 +126,11 @@ class FeatureProcessor:
         df_features = pd.DataFrame(new_features, index=df.index)
         training_df = pd.concat([df, df_features], axis=1)
         self.feature_names = [col for col in training_df.columns if col not in ['date', 'result'] + self.digits]
-        training_df.dropna(subset=self.feature_names + self.digits, inplace=True)
+        
+        # UPDATED: Ganti NaN dengan 0 setelah dropna awal untuk memastikan data fitur bersih
+        training_df[self.feature_names] = training_df[self.feature_names].fillna(0)
+        
+        training_df.dropna(subset=self.digits, inplace=True)
         return training_df
 
     def transform_for_prediction(self, historical_df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
@@ -167,7 +171,10 @@ class FeatureProcessor:
         for d in self.digits:
             for i in range(1, self.timesteps + 1):
                 pred_vector[f'{d}_lag_{i}'] = last_known_data[d].iloc[-i]
-        return pd.DataFrame([pred_vector])
+        
+        df_pred = pd.DataFrame([pred_vector])
+        # UPDATED: Ganti NaN dengan 0 untuk memastikan data prediksi bersih
+        return df_pred.fillna(0)
 
 class ModelTrainer:
     def __init__(self, digits, training_params, pasaran):
@@ -231,13 +238,11 @@ class ModelPredictor:
             logger.warning(f"Gagal memuat data awal untuk {self.pasaran}, mungkin perlu training: {e}")
         self.models_ready = self.load_models()
 
-    # UPDATED: Logika diubah agar tidak bergantung pada kunci 'default'
     def _get_config(self) -> Dict[str, Any]:
         market_config = MARKET_CONFIGS.get(self.pasaran)
         if not market_config:
             raise KeyError(f"Konfigurasi untuk pasaran '{self.pasaran}' tidak ditemukan di MARKET_CONFIGS.")
         
-        # Buat salinan untuk menghindari modifikasi konstanta asli
         config = market_config.copy()
         config["training_params"] = TRAINING_CONFIG_OPTIONS.get('OPTIMIZED')
         return config
@@ -361,23 +366,32 @@ class ModelPredictor:
         self.models_ready = self.load_models()
         return self.models_ready
 
-    def _determine_colok_bebas(self, all_candidates: List[str], digit_scores: Dict[str, List[float]]) -> str:
-        """Menentukan kandidat Colok Bebas terbaik berdasarkan frekuensi dan skor."""
-        if not all_candidates:
+    def _determine_colok_bebas(self, all_probas: Dict[str, np.ndarray], encoders: Dict[str, LabelEncoder]) -> str:
+        """
+        Menentukan kandidat Colok Bebas terbaik berdasarkan total probabilitas gabungan
+        dari semua posisi (AS, KOP, KEPALA, EKOR).
+        """
+        total_probs = {str(i): 0.0 for i in range(10)}
+
+        for digit_pos, probabilities in all_probas.items():
+            encoder = encoders.get(digit_pos)
+            if not encoder:
+                logger.warning(f"Encoder untuk {digit_pos} tidak ditemukan. Skipping.")
+                continue
+            
+            if len(encoder.classes_) != len(probabilities):
+                logger.warning(f"Mismatch antara encoder ({len(encoder.classes_)}) dan probabilitas ({len(probabilities)}) untuk {digit_pos}. Skipping.")
+                continue
+
+            for i, class_label in enumerate(encoder.classes_):
+                total_probs[str(class_label)] += probabilities[i]
+        
+        if not total_probs or all(p == 0.0 for p in total_probs.values()):
+            logger.warning("Tidak dapat menentukan Colok Bebas, tidak ada data probabilitas.")
             return ""
-        
-        counts = Counter(all_candidates)
-        max_freq = max(counts.values())
-        most_common_digits = [d for d, freq in counts.items() if freq == max_freq]
-        
-        if len(most_common_digits) == 1:
-            return most_common_digits[0]
-        else:
-            # Jika ada lebih dari satu yang paling umum, pilih berdasarkan skor rata-rata tertinggi
-            return max(
-                most_common_digits,
-                key=lambda d: np.mean(digit_scores.get(d, [0]))
-            )
+            
+        best_digit = max(total_probs, key=total_probs.get)
+        return best_digit
 
     def _determine_angka_main(self, predictions: Dict[str, List[str]]) -> List[str]:
         """Menyusun 4 digit Angka Main dari kandidat teratas."""
@@ -387,7 +401,6 @@ class ModelPredictor:
         am_candidates[predictions['kepala'][0]] = None
         am_candidates[predictions['ekor'][0]] = None
         
-        # Jika digit unik kurang dari 4, ambil dari kandidat kedua untuk melengkapi
         if len(am_candidates) < 4:
             backup_pool = [
                 predictions['as'][1], predictions['kop'][1], 
@@ -414,9 +427,7 @@ class ModelPredictor:
         
         predictions = {}
         all_probas_for_eval = {}
-        all_top_candidates = []
-        digit_scores = {}
-
+        
         scoring_config = HYBRID_SCORING_CONFIG
         use_hybrid_scoring = scoring_config.get("ENABLED", False)
         ai_weight = scoring_config.get("AI_SCORE_WEIGHT", 0.8)
@@ -458,15 +469,8 @@ class ModelPredictor:
             
             top_three_digits = encoder.inverse_transform(top_indices[:3])
             predictions[d] = [str(digit) for digit in top_three_digits]
-            
-            all_top_candidates.extend(predictions[d])
-            for i in range(len(encoder.classes_)):
-                digit_val = str(encoder.classes_[i])
-                if digit_val not in digit_scores:
-                    digit_scores[digit_val] = []
-                digit_scores[digit_val].append(final_scores[i])
 
-        colok_bebas = self._determine_colok_bebas(all_top_candidates, digit_scores)
+        colok_bebas = self._determine_colok_bebas(all_probas_for_eval, self.label_encoders)
         angka_main = self._determine_angka_main(predictions)
 
         result = {
