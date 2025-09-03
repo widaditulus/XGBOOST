@@ -1,4 +1,4 @@
-# app.py (Final - Lengkap dan Fungsional)
+# app.py (Final - Siap Produksi dengan State Management yang Aman)
 
 # -*- coding: utf-8 -*-
 import os
@@ -29,9 +29,8 @@ update_status = {}
 update_lock = threading.Lock()
 tuning_status = {}
 tuning_lock = threading.Lock()
-cb_tuning_status = {} # Status terpisah untuk tuning CB
+cb_tuning_status = {} 
 cb_tuning_lock = threading.Lock()
-
 
 @app.errorhandler(Exception)
 def handle_unexpected_error(e):
@@ -64,7 +63,6 @@ def get_predictor(pasaran: str) -> ModelPredictor:
 def index():
     return render_template('index.html', pasaran_list=PASARAN_LIST, display_mapping=PASARAN_DISPLAY_MAPPING)
 
-# UPDATED: Endpoint baru untuk memeriksa kesegaran data
 @app.route('/data-status/<pasaran>')
 @validate_pasaran
 def data_status(pasaran):
@@ -81,16 +79,13 @@ def data_status(pasaran):
 def start_training(pasaran):
     training_mode = request.form.get('training_mode', 'OPTIMIZED')
     use_recency_bias = request.form.get('use_recency_bias') == 'true'
-
     if training_mode not in TRAINING_CONFIG_OPTIONS and training_mode != 'AUTO':
         abort(400, description=f"Mode training '{training_mode}' tidak valid.")
-        
     with training_lock:
         if training_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Training untuk {pasaran.upper()} sudah berjalan."}), 409
         training_status[pasaran] = 'running'
         training_status[f"{pasaran}_message"] = "Proses training dimulai..."
-
     thread = threading.Thread(target=run_training_in_background, args=(pasaran, training_mode, use_recency_bias))
     thread.daemon = True
     thread.start()
@@ -130,7 +125,6 @@ def start_tuning(pasaran):
             return jsonify({"status": "error", "message": f"Optimasi 4D untuk {pasaran.upper()} sudah berjalan."}), 409
         tuning_status[pasaran] = 'running'
         tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter 4D..."
-
     thread = threading.Thread(target=run_tuning_in_background, args=(pasaran,))
     thread.daemon = True
     thread.start()
@@ -169,7 +163,6 @@ def start_cb_tuning(pasaran):
             return jsonify({"status": "error", "message": f"Optimasi CB untuk {pasaran.upper()} sudah berjalan."}), 409
         cb_tuning_status[pasaran] = 'running'
         cb_tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter CB..."
-
     thread = threading.Thread(target=run_cb_tuning_in_background, args=(pasaran,))
     thread.daemon = True
     thread.start()
@@ -212,13 +205,11 @@ def start_evaluation(pasaran):
             abort(400, description="Tanggal mulai tidak boleh setelah tanggal akhir.")
     except (ValueError, TypeError):
         abort(400, description="Format tanggal tidak valid. Gunakan YYYY-MM-DD.")
-
     with evaluation_lock:
         if evaluation_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Evaluasi untuk {pasaran.upper()} sudah berjalan."}), 409
         evaluation_status[pasaran] = 'running'
         evaluation_status[f"{pasaran}_data"] = None
-
     thread = threading.Thread(target=run_evaluation_in_background, args=(pasaran, start_date, end_date))
     thread.daemon = True
     thread.start()
@@ -246,6 +237,21 @@ def get_evaluation_status(pasaran):
         data = evaluation_status.get(f"{pasaran}_data", {})
     return jsonify({"status": status, "data": data})
 
+@app.route('/confusion-matrix/<pasaran>')
+@validate_pasaran
+def get_confusion_matrix(pasaran):
+    try:
+        with evaluation_lock:
+            eval_data = evaluation_status.get(f"{pasaran}_data")
+        if not eval_data or not eval_data.get("results"):
+            return jsonify({"error": "Data evaluasi tidak ditemukan. Jalankan evaluasi terlebih dahulu."}), 404
+        predictor = get_predictor(pasaran)
+        cm_data = predictor.get_confusion_matrix_data(eval_data["results"])
+        return jsonify(cm_data)
+    except Exception as e:
+        logger.error(f"Gagal membuat confusion matrix untuk {pasaran}: {e}", exc_info=True)
+        return jsonify({"error": "Gagal memproses data confusion matrix.", "details": str(e)}), 500
+
 @app.route('/update-data', methods=['POST'])
 @validate_pasaran
 def update_data(pasaran):
@@ -254,7 +260,6 @@ def update_data(pasaran):
             return jsonify({"status": "error", "message": f"Proses update data untuk {pasaran.upper()} sudah berjalan."}), 409
         update_status[pasaran] = 'running'
         update_status[f"{pasaran}_message"] = "Memulai sinkronisasi data..."
-
     thread = threading.Thread(target=run_data_update_in_background, args=(pasaran,))
     thread.daemon = True
     thread.start()
@@ -288,7 +293,6 @@ def predict(pasaran):
     prediction_date_str = request.form.get('prediction_date')
     if not prediction_date_str:
         abort(400, description="Parameter 'prediction_date' tidak boleh kosong.")
-    
     try:
         predictor = get_predictor(pasaran)
         prediction_result = predictor.predict_next_day(target_date_str=prediction_date_str)

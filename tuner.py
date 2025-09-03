@@ -1,4 +1,4 @@
-# tuner.py (Final - KeyError Diperbaiki)
+# tuner.py (Final - Kebocoran Data Diperbaiki)
 
 # -*- coding: utf-8 -*-
 import os
@@ -7,7 +7,8 @@ import optuna
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from sklearn.model_selection import StratifiedKFold, KFold
+# UPDATED: TimeSeriesSplit diimpor untuk cross-validation data waktu yang benar
+from sklearn.model_selection import StratifiedKFold, KFold, TimeSeriesSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import log_loss
 
@@ -18,7 +19,7 @@ from constants import MODELS_DIR, MARKET_CONFIGS
 TUNING_CONFIG = {
     "N_TRIALS_4D": 75,
     "N_TRIALS_CB": 25,
-    "N_SPLITS": 3,
+    "N_SPLITS": 5, # UPDATED: Splits disarankan lebih banyak untuk TimeSeriesSplit
     "TIMEOUT": 4000
 }
 
@@ -38,7 +39,6 @@ class HyperparameterTuner:
         fp = FeatureProcessor(config["strategy"]["timesteps"], config["feature_engineering"])
         training_df = fp.fit_transform(df_full)
         
-        # --- UPDATED: Reset index untuk mencegah KeyError saat cross-validation ---
         training_df.reset_index(drop=True, inplace=True)
         
         self.X = training_df[fp.feature_names]
@@ -53,6 +53,10 @@ class HyperparameterTuner:
             raise ValueError("Mode tuning tidak valid. Pilih '4D' atau 'CB'.")
 
     def _objective(self, trial: optuna.Trial) -> float:
+        # UPDATED: Menggunakan TimeSeriesSplit untuk mencegah kebocoran data.
+        # TimeSeriesSplit memastikan model tidak 'melihat' data masa depan saat validasi.
+        cv = TimeSeriesSplit(n_splits=TUNING_CONFIG["N_SPLITS"])
+
         if self.mode == '4D':
             params = {
                 'objective': 'multi:softprob',
@@ -61,8 +65,7 @@ class HyperparameterTuner:
                 'max_depth': trial.suggest_int('max_depth', 4, 10),
                 'reg_lambda': trial.suggest_float('reg_lambda', 1.0, 3.0),
             }
-            cv = StratifiedKFold(n_splits=TUNING_CONFIG["N_SPLITS"], shuffle=True, random_state=42)
-        else:
+        else: # Mode CB
             params = {
                 'objective': 'binary:logistic',
                 'eval_metric': 'logloss',
@@ -71,7 +74,6 @@ class HyperparameterTuner:
                 'reg_lambda': trial.suggest_float('reg_lambda', 1.0, 4.0),
                 'scale_pos_weight': trial.suggest_float('scale_pos_weight', 1.0, (self.y_encoded == 0).sum() / (self.y_encoded == 1).sum() if (self.y_encoded == 1).sum() > 0 else 1)
             }
-            cv = KFold(n_splits=TUNING_CONFIG["N_SPLITS"], shuffle=True, random_state=42)
 
         params.update({
             'random_state': 42,
@@ -84,10 +86,10 @@ class HyperparameterTuner:
         })
 
         logloss_scores = []
-        # Gunakan .values untuk mengubah ke NumPy array dan menghindari masalah index Pandas
         y_values = self.y_encoded if isinstance(self.y_encoded, np.ndarray) else self.y_encoded.values
 
-        for train_idx, val_idx in cv.split(self.X, y_values):
+        # UPDATED: cv.split sekarang tidak memerlukan y_values karena TimeSeriesSplit tidak di-stratifikasi.
+        for train_idx, val_idx in cv.split(self.X):
             X_train, X_val = self.X.iloc[train_idx], self.X.iloc[val_idx]
             y_train, y_val = y_values[train_idx], y_values[val_idx]
 

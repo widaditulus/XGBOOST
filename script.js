@@ -1,13 +1,17 @@
-// script.js (Final - Dengan Monitoring Tuning CB)
+// script.js (Final - Siap Produksi dengan Analisis Kesalahan dan State UI yang Aman)
 
 document.addEventListener('DOMContentLoaded', function() {
+    // UPDATED: Plugin Chart.js didaftarkan satu kali di awal untuk stabilitas.
+    Chart.register(ChartDataLabels);
+
     let currentPasaran = document.getElementById('pasaranSelect').value;
     let trainingInterval = null;
     let evaluationInterval = null;
     let updateInterval = null; 
     let tuningInterval = null;
-    let cbTuningInterval = null; // Interval baru untuk CB Tuning
+    let cbTuningInterval = null;
     const charts = {};
+    const cmCharts = {};
 
     const ui = {
         loadingOverlay: document.getElementById('loading-overlay'),
@@ -35,9 +39,8 @@ document.addEventListener('DOMContentLoaded', function() {
         trainingProgress: document.querySelector('.progress'),
         trainingProgressBar: document.getElementById('trainingProgressBar'),
         startTuningBtn: document.getElementById('startTuningBtn'),
-        startCbTuningBtn: document.getElementById('startCbTuningBtn'), // Tombol baru
+        startCbTuningBtn: document.getElementById('startCbTuningBtn'),
         tuningActivityStatus: document.getElementById('tuningActivityStatus'),
-        
         healthTab: document.getElementById('health-tab'),
         evaluationTab: document.getElementById('evaluation-tab'),
         evalStartDate: document.getElementById('evalStartDate'),
@@ -59,7 +62,9 @@ document.addEventListener('DOMContentLoaded', function() {
         driftLog: document.getElementById('driftLog'),
         refreshFeatureImportance: document.getElementById('refreshFeatureImportance'),
         refreshDriftLog: document.getElementById('refreshDriftLog'),
-        activePasaranForHealth: document.getElementById('activePasaranForHealth')
+        activePasaranForHealth: document.getElementById('activePasaranForHealth'),
+        showConfusionMatrixBtn: document.getElementById('showConfusionMatrixBtn'),
+        confusionMatrixArea: document.getElementById('confusionMatrixArea')
     };
 
     function showAlert(message, type = 'info') {
@@ -94,7 +99,6 @@ document.addEventListener('DOMContentLoaded', function() {
         ui.activePasaranForHealth.textContent = pasaranDisplayName;
     }
 
-    // UPDATED: Menambahkan informasi tanggal pada status data
     function checkDataStatus() {
         if (!currentPasaran) return;
         ui.dataStatus.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Memeriksa...`;
@@ -358,6 +362,8 @@ document.addEventListener('DOMContentLoaded', function() {
         ui.evaluationStatus.innerHTML = `<div class="spinner-border text-info" role="status"></div><p class="mt-2">Menjalankan evaluasi...</p>`;
         ui.evaluationDetailTableBody.innerHTML = '';
         ui.evaluationSummaryCards.style.display = 'none';
+        ui.showConfusionMatrixBtn.style.display = 'none';
+        ui.confusionMatrixArea.style.display = 'none';
         
         const formData = new FormData();
         formData.append('pasaran', currentPasaran);
@@ -404,6 +410,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     ui.startEvaluationBtn.innerHTML = `<i class="fas fa-play-circle me-2"></i>Mulai Evaluasi`;
                     ui.evaluationStatus.innerHTML = `<span class="badge bg-success">Selesai</span>`;
                     
+                    if (data.data.results && data.data.results.length > 0) {
+                        ui.showConfusionMatrixBtn.style.display = 'inline-block';
+                    }
+
                     const summary = data.data.summary;
                     const results = data.data.results;
                     
@@ -433,16 +443,105 @@ document.addEventListener('DOMContentLoaded', function() {
                         });
                         ui.evaluationDetailTableBody.innerHTML = tableContent;
                     } else {
-                        ui.evaluationDetailTableBody.innerHTML = `<tr><td colspan="8">Tidak ada hasil</td></tr>`;
+                        ui.evaluationDetailTableBody.innerHTML = `<tr><td colspan="8">Tidak ada hasil untuk ditampilkan.</td></tr>`;
                     }
                 } else if (data.status === 'failed') {
                     clearInterval(evaluationInterval);
                     ui.startEvaluationBtn.disabled = false;
                     ui.startEvaluationBtn.innerHTML = `<i class="fas fa-play-circle me-2"></i>Mulai Evaluasi`;
-                    ui.evaluationStatus.innerHTML = `<span class="badge bg-danger">Gagal</span>`;
+                    ui.evaluationStatus.innerHTML = `<span class="badge bg-danger">Gagal</span>: ${data.data?.summary?.error || 'Error tidak diketahui'}`;
                 }
             });
         }, 2500);
+    }
+
+    function renderConfusionMatrix(data) {
+        if (!data || !data.labels || !data.matrices) {
+            showAlert('Gagal memuat data confusion matrix.', 'danger');
+            return;
+        }
+
+        const { labels, matrices } = data;
+        const createDataset = (matrix) => {
+            const dataset = [];
+            for (let i = 0; i < matrix.length; i++) {
+                for (let j = 0; j < matrix[i].length; j++) {
+                    dataset.push({ x: labels[j], y: labels[i], v: matrix[i][j] });
+                }
+            }
+            return dataset;
+        };
+        
+        Object.values(cmCharts).forEach(chart => {
+            if (chart) chart.destroy();
+        });
+
+        ['as', 'kop', 'kepala', 'ekor'].forEach(digit => {
+            const chartId = `cm${digit.charAt(0).toUpperCase() + digit.slice(1)}Chart`;
+            const ctx = document.getElementById(chartId).getContext('2d');
+            cmCharts[digit] = new Chart(ctx, {
+                type: 'matrix',
+                data: {
+                    datasets: [{
+                        label: `CM ${digit}`, data: createDataset(matrices[digit]),
+                        backgroundColor: (ctx) => {
+                            const value = ctx.dataset.data[ctx.dataIndex].v;
+                            if (ctx.raw.x === ctx.raw.y) return 'rgba(25, 135, 84, 0.7)';
+                            if (value === 0) return 'rgba(248, 249, 250, 1)';
+                            const alpha = Math.min(0.2 + (value / 5), 1);
+                            return `rgba(220, 53, 69, ${alpha})`;
+                        },
+                        borderColor: 'grey', borderWidth: 1,
+                        width: ({chart}) => (chart.chartArea.width / labels.length) - 1,
+                        height: ({chart}) =>(chart.chartArea.height / labels.length) - 1
+                    }]
+                },
+                options: {
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                title: () => '',
+                                label: (ctx) => `Aktual: ${ctx.raw.y}, Prediksi: ${ctx.raw.x}, Jumlah: ${ctx.raw.v}`
+                            }
+                        },
+                        datalabels: {
+                            formatter: (context) => context.dataset.data[context.dataIndex].v > 0 ? context.dataset.data[context.dataIndex].v : '',
+                            color: (context) => {
+                                 const value = context.dataset.data[context.dataIndex].v;
+                                 if (context.raw.x === context.raw.y || value > 5) return 'white';
+                                 return 'black';
+                            },
+                            font: { size: '10px' }
+                        }
+                    },
+                    scales: {
+                        x: { type: 'category', labels: labels, grid: { display: false } },
+                        // UPDATED: 'offset: true' dihapus untuk memperbaiki render matriks.
+                        y: { type: 'category', labels: labels, grid: { display: false } }
+                    },
+                    responsive: true, maintainAspectRatio: false
+                }
+            });
+        });
+        ui.confusionMatrixArea.style.display = 'block';
+    }
+
+    function getAndShowConfusionMatrix() {
+        const btn = ui.showConfusionMatrixBtn;
+        btn.disabled = true;
+        btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Memuat...`;
+        
+        fetchData(`/confusion-matrix/${currentPasaran}`).then(data => {
+            if (data && !data.error) {
+                renderConfusionMatrix(data);
+            } else {
+                 showAlert(data.error || 'Gagal mengambil data', 'danger');
+            }
+        }).finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = `<i class="fas fa-th me-2"></i>Tampilkan Analisis Kesalahan`;
+        });
     }
 
     function renderFeatureImportanceCharts(data) {
@@ -474,30 +573,33 @@ document.addEventListener('DOMContentLoaded', function() {
             updateSystemStatus();
             updateActivePasaranDisplay();
             ui.predictionDisplay.style.display = 'none';
+            ui.evaluationResultArea.style.display = 'none'; 
+            ui.showConfusionMatrixBtn.style.display = 'none';
+            ui.confusionMatrixArea.style.display = 'none';
         });
+
         ui.predictBtn.addEventListener('click', getPrediction);
         ui.startTrainingBtn.addEventListener('click', startTraining);
         ui.updateDataBtn.addEventListener('click', startUpdateData);
         ui.startTuningBtn.addEventListener('click', startTuning);
         ui.startCbTuningBtn.addEventListener('click', startCbTuning);
-        
         ui.startEvaluationBtn.addEventListener('click', startEvaluation);
+        ui.showConfusionMatrixBtn.addEventListener('click', getAndShowConfusionMatrix);
+        
         ui.evaluationTab.addEventListener('shown.bs.tab', updateActivePasaranDisplay);
         ui.healthTab.addEventListener('shown.bs.tab', () => {
             updateActivePasaranDisplay();
             loadFeatureImportance();
             loadDriftLog();
         });
+
         ui.refreshFeatureImportance.addEventListener('click', loadFeatureImportance);
         ui.refreshDriftLog.addEventListener('click', loadDriftLog);
         
         const today = new Date();
-        const tomorrow = new Date();
-        tomorrow.setDate(today.getDate() + 1);
-        const yesterday = new Date();
-        yesterday.setDate(today.getDate() - 1);
-        const aMonthAgo = new Date();
-        aMonthAgo.setDate(today.getDate() - 30);
+        const tomorrow = new Date(); tomorrow.setDate(today.getDate() + 1);
+        const yesterday = new Date(); yesterday.setDate(today.getDate() - 1);
+        const aMonthAgo = new Date(); aMonthAgo.setDate(today.getDate() - 30);
         ui.predictionDateInput.value = tomorrow.toISOString().split('T')[0];
         ui.evalEndDate.value = yesterday.toISOString().split('T')[0];
         ui.evalStartDate.value = aMonthAgo.toISOString().split('T')[0];
