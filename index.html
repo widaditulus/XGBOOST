@@ -117,6 +117,28 @@
                                         </button>
                                     </div>
                                 </div>
+
+                                <div class="form-check form-switch mt-3">
+                                    <input class="form-check-input" type="checkbox" id="verificationModeCheck">
+                                    <label class="form-check-label" for="verificationModeCheck">
+                                        Gunakan Mode Verifikasi (Pilih Tanggal Mundur)
+                                    </label>
+                                </div>
+                                <div id="predictionModeContainer" class="mt-2" style="display: none;">
+                                    <label class="form-label small text-muted">Mode Prediksi untuk Verifikasi:</label>
+                                    <div class="bg-light p-2 rounded border">
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input" type="radio" name="predModeOptions" id="predQuick" value="quick" checked>
+                                            <label class="form-check-label" for="predQuick">Cepat (XGBoost)</label>
+                                        </div>
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input" type="radio" name="predModeOptions" id="predDeep" value="deep">
+                                            <label class="form-check-label" for="predDeep">Mendalam (Ensemble)</label>
+                                        </div>
+                                    </div>
+                                </div>
+
+
                                 <hr>
                                 <div id="prediction-display" class="text-center" style="display: none;">
                                     <h3 class="text-muted">Hasil Prediksi untuk <span id="predDate" class="text-primary"></span></h3>
@@ -183,19 +205,36 @@
                             Pasaran yang sedang dievaluasi: <strong id="activePasaranForEval" class="fs-5"></strong>
                         </div>
                         
-                        <div class="row align-items-end bg-light p-3 rounded">
-                            <div class="col-md-4">
-                                <label for="evalStartDate" class="form-label">Tanggal Mulai:</label>
-                                <input type="date" id="evalStartDate" class="form-control">
+                        <div class="bg-light p-3 rounded">
+                            <div class="row align-items-end">
+                                <div class="col-md-4">
+                                    <label for="evalStartDate" class="form-label">Tanggal Mulai:</label>
+                                    <input type="date" id="evalStartDate" class="form-control">
+                                </div>
+                                <div class="col-md-4">
+                                    <label for="evalEndDate" class="form-label">Tanggal Akhir:</label>
+                                    <input type="date" id="evalEndDate" class="form-control">
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label">Mode Evaluasi:</label>
+                                    <div id="evaluationMode" class="bg-white p-2 rounded border">
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input" type="radio" name="evalModeOptions" id="evalQuick" value="quick" checked>
+                                            <label class="form-check-label" for="evalQuick">Cepat (XGBoost)</label>
+                                        </div>
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input" type="radio" name="evalModeOptions" id="evalDeep" value="deep">
+                                            <label class="form-check-label" for="evalDeep">Mendalam (Ensemble)</label>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="col-md-4">
-                                <label for="evalEndDate" class="form-label">Tanggal Akhir:</label>
-                                <input type="date" id="evalEndDate" class="form-control">
-                            </div>
-                            <div class="col-md-4">
-                                <button id="startEvaluationBtn" class="btn btn-info w-100">
-                                    <i class="fas fa-play-circle me-2"></i>Mulai Evaluasi
-                                </button>
+                            <div class="row mt-3">
+                                <div class="col-12">
+                                    <button id="startEvaluationBtn" class="btn btn-info w-100">
+                                        <i class="fas fa-play-circle me-2"></i>Mulai Evaluasi
+                                    </button>
+                                </div>
                             </div>
                         </div>
                         

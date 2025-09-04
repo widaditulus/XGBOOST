@@ -1,4 +1,4 @@
-# app.py (Final - Lengkap dan Fungsional)
+# app.py (Final - Mendukung Mode Prediksi Fleksibel)
 
 # -*- coding: utf-8 -*-
 import os
@@ -64,7 +64,6 @@ def get_predictor(pasaran: str) -> ModelPredictor:
 def index():
     return render_template('index.html', pasaran_list=PASARAN_LIST, display_mapping=PASARAN_DISPLAY_MAPPING)
 
-# UPDATED: Endpoint baru untuk memeriksa kesegaran data
 @app.route('/data-status/<pasaran>')
 @validate_pasaran
 def data_status(pasaran):
@@ -205,6 +204,8 @@ def get_cb_tuning_status(pasaran):
 def start_evaluation(pasaran):
     start_date_str = request.form.get('start_date')
     end_date_str = request.form.get('end_date')
+    evaluation_mode = request.form.get('evaluation_mode', 'quick') 
+
     try:
         start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
         end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
@@ -219,16 +220,16 @@ def start_evaluation(pasaran):
         evaluation_status[pasaran] = 'running'
         evaluation_status[f"{pasaran}_data"] = None
 
-    thread = threading.Thread(target=run_evaluation_in_background, args=(pasaran, start_date, end_date))
+    thread = threading.Thread(target=run_evaluation_in_background, args=(pasaran, start_date, end_date, evaluation_mode))
     thread.daemon = True
     thread.start()
     return jsonify({"status": "success", "message": f"Proses evaluasi untuk {pasaran.upper()} dimulai."})
 
-def run_evaluation_in_background(pasaran: str, start_date: datetime, end_date: datetime):
+def run_evaluation_in_background(pasaran: str, start_date: datetime, end_date: datetime, evaluation_mode: str):
     try:
-        logger.info(f"Memulai thread evaluasi untuk {pasaran} dari {start_date} hingga {end_date}.")
+        logger.info(f"Memulai thread evaluasi untuk {pasaran} dari {start_date} hingga {end_date} dengan mode '{evaluation_mode}'.")
         predictor = get_predictor(pasaran)
-        result = predictor.evaluate_performance(start_date, end_date)
+        result = predictor.evaluate_performance(start_date, end_date, evaluation_mode=evaluation_mode)
         with evaluation_lock:
             evaluation_status[pasaran] = 'completed'
             evaluation_status[f"{pasaran}_data"] = result
@@ -282,16 +283,24 @@ def get_update_status(pasaran):
         message = update_status.get(f"{pasaran}_message", "")
     return jsonify({"status": status, "message": message})
 
+# UPDATED: Endpoint /predict sekarang menerima mode evaluasi untuk verifikasi
 @app.route('/predict', methods=['POST'])
 @validate_pasaran
 def predict(pasaran):
     prediction_date_str = request.form.get('prediction_date')
+    # Ambil mode dari form, default ke 'deep' jika tidak ada (untuk prediksi masa depan)
+    evaluation_mode = request.form.get('evaluation_mode', 'deep')
+    
     if not prediction_date_str:
         abort(400, description="Parameter 'prediction_date' tidak boleh kosong.")
     
     try:
         predictor = get_predictor(pasaran)
-        prediction_result = predictor.predict_next_day(target_date_str=prediction_date_str)
+        # Teruskan mode yang diterima ke fungsi inti
+        prediction_result = predictor.predict_next_day(
+            target_date_str=prediction_date_str, 
+            evaluation_mode=evaluation_mode
+        )
         return jsonify(prediction_result)
     except (PredictionError, DataFetchingError) as e:
         return jsonify({"error": "Gagal membuat prediksi", "details": str(e)}), 400

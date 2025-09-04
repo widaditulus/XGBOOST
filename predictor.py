@@ -1,4 +1,4 @@
-# predictor.py (Final - Dengan Strategi CB Hibrida dan Integrasi Tuning)
+# predictor.py (Final - Konsistensi Penuh & Anti-Data Leakage)
 
 # -*- coding: utf-8 -*-
 import os
@@ -70,7 +70,6 @@ class DataManager:
                 self.df = df_sorted
             return self.df.copy()
 
-    # UPDATED: Metode baru untuk memeriksa kesegaran data antara lokal dan remote
     @error_handler(logger)
     def check_data_freshness(self) -> Dict[str, Any]:
         """Membandingkan tanggal data terbaru dari DB lokal dan GitHub."""
@@ -311,7 +310,7 @@ class ModelPredictor:
             
         self.feature_names = joblib.load(features_path)
         
-        xgb_loaded, cb_loaded = 0, 0
+        xgb_loaded, cb_loaded, rf_loaded, lgbm_loaded = 0, 0, 0, 0
         for d in self.digits:
             model_path = os.path.join(self.model_dir_base, f"model_{d}.pkl")
             if os.path.exists(model_path):
@@ -320,6 +319,14 @@ class ModelPredictor:
             encoder_path = os.path.join(self.model_dir_base, f"encoder_{d}.pkl")
             if os.path.exists(encoder_path):
                 self.label_encoders[d] = joblib.load(encoder_path)
+            rf_model_path = os.path.join(self.model_dir_base, f"rf_model_{d}.pkl")
+            if os.path.exists(rf_model_path):
+                self.rf_models[d] = joblib.load(rf_model_path)
+                rf_loaded += 1
+            lgbm_model_path = os.path.join(self.model_dir_base, f"lgbm_model_{d}.pkl")
+            if os.path.exists(lgbm_model_path):
+                self.lgbm_models[d] = joblib.load(lgbm_model_path)
+                lgbm_loaded += 1
         
         for i in range(10):
             cb_model_path = os.path.join(self.model_dir_base, f"model_cb_{i}.pkl")
@@ -327,7 +334,7 @@ class ModelPredictor:
                 self.cb_models[str(i)] = joblib.load(cb_model_path)
                 cb_loaded += 1
         
-        logger.info(f"Model loaded: 4D_XGB({xgb_loaded}/{len(self.digits)}), CB_XGB({cb_loaded}/10)")
+        logger.info(f"Model loaded: 4D_XGB({xgb_loaded}/{len(self.digits)}), CB_XGB({cb_loaded}/10), RF({rf_loaded}/{len(self.digits)}), LGBM({lgbm_loaded}/{len(self.digits)})")
         return xgb_loaded == len(self.digits) and cb_loaded == 10
 
     @error_handler(logger)
@@ -373,11 +380,16 @@ class ModelPredictor:
             y_full = training_df[digit]
             if y_full.nunique() < 2: continue
             
-            model, le, importance, _ = model_trainer.train_digit_model(X_full, y_full, digit, sample_weights=sample_weights)
+            model, le, importance, y_encoded = model_trainer.train_digit_model(X_full, y_full, digit, sample_weights=sample_weights)
             if model and le and importance:
                 joblib.dump(model, os.path.join(self.model_dir_base, f"model_{digit}.pkl"))
                 joblib.dump(le, os.path.join(self.model_dir_base, f"encoder_{digit}.pkl"))
                 pd.DataFrame(importance.items(), columns=['feature', 'weight']).sort_values('weight', ascending=False).to_csv(os.path.join(self.model_dir_base, f"feature_importance_{digit}.csv"), index=False)
+                
+                if ENSEMBLE_CONFIG.get("USE_ENSEMBLE", False):
+                    logger.info(f"Memulai training model ensemble untuk digit: {digit}")
+                    train_ensemble_models(X_full, y_encoded, self.model_dir_base, digit)
+
                 self._check_for_drift(digit)
 
         logger.info("--- Memulai Training Model Colok Bebas (CB) ---")
@@ -445,13 +457,23 @@ class ModelPredictor:
         return sorted(list(am_candidates.keys()))[:4]
 
     @error_handler(drift_logger)
-    def predict_next_day(self, target_date_str: Optional[str] = None, for_evaluation: bool = False) -> Dict[str, Any]:
+    def predict_next_day(self, target_date_str: Optional[str] = None, evaluation_mode: str = 'deep') -> Dict[str, Any]:
         if not self.models_ready:
             raise PredictionError("Model tidak siap. Silakan jalankan training.")
-        
+
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
-        base_df = self.data_manager.get_data()
-        latest_features = self.feature_processor.transform_for_prediction(base_df, target_date)
+        
+        # --- UPDATED: KRITIS - Mencegah Data Leakage ---
+        # Ambil semua data, lalu filter HANYA data SEBELUM tanggal target.
+        # Ini memastikan prediksi historis tidak "curang".
+        full_df = self.data_manager.get_data()
+        historical_df = full_df[full_df['date'] < target_date].copy()
+        
+        # Jika tidak ada data historis yang tersisa (misalnya, tanggal pertama), error.
+        if historical_df.empty:
+            raise PredictionError(f"Tidak ada data historis sebelum {target_date.strftime('%Y-%m-%d')} untuk membuat prediksi.")
+
+        latest_features = self.feature_processor.transform_for_prediction(historical_df, target_date)
         latest_features = latest_features.reindex(columns=self.feature_names, fill_value=0)
         
         predictions = {}
@@ -460,14 +482,28 @@ class ModelPredictor:
             encoder = self.label_encoders[d]
             if not encoder: raise PredictionError(f"Encoder untuk '{d}' tidak tersedia.")
             
-            raw_probabilities = self.models[d].predict_proba(latest_features)[0]
-            all_4d_probas[d] = raw_probabilities
-            top_indices = np.argsort(raw_probabilities)[::-1]
+            if evaluation_mode == 'deep':
+                active_models = {
+                    'xgb': self.models.get(d),
+                    'rf': self.rf_models.get(d),
+                    'lgbm': self.lgbm_models.get(d)
+                }
+                loaded_models = {name: model for name, model in active_models.items() if model is not None}
+                if not loaded_models:
+                    raise PredictionError(f"Tidak ada model yang termuat untuk digit '{d}'.")
+                probabilities = ensemble_predict_proba(loaded_models, latest_features)[0]
+            else: # mode 'quick'
+                xgb_model = self.models.get(d)
+                if not xgb_model:
+                     raise PredictionError(f"Model XGBoost tidak ditemukan untuk digit '{d}'.")
+                probabilities = xgb_model.predict_proba(latest_features)[0]
+            
+            all_4d_probas[d] = probabilities
+            top_indices = np.argsort(probabilities)[::-1]
             top_three_digits = encoder.inverse_transform(top_indices[:3])
             predictions[d] = [str(digit) for digit in top_three_digits]
 
         strategy = CB_STRATEGY_CONFIG.get(self.pasaran, "dedicated")
-        logger.info(f"Menggunakan strategi CB '{strategy}' untuk pasaran {self.pasaran}.")
 
         if strategy == "aggregated":
             colok_bebas = self._determine_colok_bebas_aggregated(all_4d_probas)
@@ -488,19 +524,23 @@ class ModelPredictor:
         }
     
     @error_handler(drift_logger)
-    def evaluate_performance(self, start_date: datetime, end_date: datetime) -> Dict[str, Any]:
+    def evaluate_performance(self, start_date: datetime, end_date: datetime, evaluation_mode: str = 'quick') -> Dict[str, Any]:
         df = self.data_manager.get_data(force_github=True)
         eval_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
         if eval_df.empty: return {"summary": {"error": "Tidak ada data pada periode yang diminta"}, "results": []}
         results_list = []
+        
+        logger.info(f"Memulai evaluasi dengan mode: '{evaluation_mode.upper()}'")
+        
         for _, row in eval_df.iterrows():
             try:
-                pred_result = self.predict_next_day(row['date'].strftime('%Y-%m-%d'), for_evaluation=True)
+                pred_result = self.predict_next_day(row['date'].strftime('%Y-%m-%d'), evaluation_mode=evaluation_mode)
                 actual_result = row['result']
                 if pred_result and actual_result:
                     results_list.append({ "date": row['date'].strftime('%Y-%m-%d'), "actual": actual_result, **pred_result })
             except PredictionError as e:
                 logger.warning(f"Skipping evaluasi untuk {row['date'].strftime('%Y-%m-%d')}: {e}")
+        
         if not results_list: return {"summary": {"error": "Gagal menghasilkan prediksi."}, "results": []}
         eval_summary_df = pd.DataFrame(results_list)
         def check_hit_digits(p, a): return a in p.replace(' ','').split(',') if isinstance(p, str) else False

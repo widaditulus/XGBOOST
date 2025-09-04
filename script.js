@@ -1,4 +1,4 @@
-// script.js (Final - Dengan Monitoring Tuning CB)
+// script.js (Final - Mendukung Verifikasi & Mode Prediksi Fleksibel)
 
 document.addEventListener('DOMContentLoaded', function() {
     let currentPasaran = document.getElementById('pasaranSelect').value;
@@ -6,7 +6,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let evaluationInterval = null;
     let updateInterval = null; 
     let tuningInterval = null;
-    let cbTuningInterval = null; // Interval baru untuk CB Tuning
+    let cbTuningInterval = null;
     const charts = {};
 
     const ui = {
@@ -35,13 +35,14 @@ document.addEventListener('DOMContentLoaded', function() {
         trainingProgress: document.querySelector('.progress'),
         trainingProgressBar: document.getElementById('trainingProgressBar'),
         startTuningBtn: document.getElementById('startTuningBtn'),
-        startCbTuningBtn: document.getElementById('startCbTuningBtn'), // Tombol baru
+        startCbTuningBtn: document.getElementById('startCbTuningBtn'),
         tuningActivityStatus: document.getElementById('tuningActivityStatus'),
         
         healthTab: document.getElementById('health-tab'),
         evaluationTab: document.getElementById('evaluation-tab'),
         evalStartDate: document.getElementById('evalStartDate'),
         evalEndDate: document.getElementById('evalEndDate'),
+        evaluationMode: document.getElementById('evaluationMode'),
         startEvaluationBtn: document.getElementById('startEvaluationBtn'),
         evaluationResultArea: document.getElementById('evaluationResultArea'),
         evaluationStatus: document.getElementById('evaluationStatus'),
@@ -59,7 +60,11 @@ document.addEventListener('DOMContentLoaded', function() {
         driftLog: document.getElementById('driftLog'),
         refreshFeatureImportance: document.getElementById('refreshFeatureImportance'),
         refreshDriftLog: document.getElementById('refreshDriftLog'),
-        activePasaranForHealth: document.getElementById('activePasaranForHealth')
+        activePasaranForHealth: document.getElementById('activePasaranForHealth'),
+
+        // UPDATED: Menambahkan elemen UI baru untuk verifikasi
+        verificationModeCheck: document.getElementById('verificationModeCheck'),
+        predictionModeContainer: document.getElementById('predictionModeContainer')
     };
 
     function showAlert(message, type = 'info') {
@@ -94,7 +99,6 @@ document.addEventListener('DOMContentLoaded', function() {
         ui.activePasaranForHealth.textContent = pasaranDisplayName;
     }
 
-    // UPDATED: Menambahkan informasi tanggal pada status data
     function checkDataStatus() {
         if (!currentPasaran) return;
         ui.dataStatus.innerHTML = `<i class="fas fa-spinner fa-spin"></i> Memeriksa...`;
@@ -139,9 +143,20 @@ document.addEventListener('DOMContentLoaded', function() {
         const originalText = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Memprediksi...`;
+        
         const formData = new FormData();
         formData.append('pasaran', currentPasaran);
         formData.append('prediction_date', ui.predictionDateInput.value);
+
+        // UPDATED: Kirim mode evaluasi jika dalam mode verifikasi
+        if (ui.verificationModeCheck.checked) {
+            const selectedMode = document.querySelector('input[name="predModeOptions"]:checked').value;
+            formData.append('evaluation_mode', selectedMode);
+        } else {
+            // Untuk prediksi masa depan, selalu gunakan mode 'deep'
+            formData.append('evaluation_mode', 'deep');
+        }
+
         fetchData('/predict', { method: 'POST', body: formData }).then(data => {
             if (data && data.final_4d_prediction) {
                 ui.predDate.textContent = data.prediction_date;
@@ -363,6 +378,8 @@ document.addEventListener('DOMContentLoaded', function() {
         formData.append('pasaran', currentPasaran);
         formData.append('start_date', ui.evalStartDate.value);
         formData.append('end_date', ui.evalEndDate.value);
+        const selectedMode = document.querySelector('input[name="evalModeOptions"]:checked').value;
+        formData.append('evaluation_mode', selectedMode);
 
         fetchData('/start-evaluation', { method: 'POST', body: formData }).then(data => {
             if (data?.status === 'success') {
@@ -468,6 +485,20 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    // UPDATED: Fungsi untuk mengatur tampilan mode verifikasi
+    function toggleVerificationMode() {
+        const isChecked = ui.verificationModeCheck.checked;
+        if (isChecked) {
+            ui.predictionModeContainer.style.display = 'block';
+        } else {
+            ui.predictionModeContainer.style.display = 'none';
+            // Set tanggal kembali ke besok jika mode verifikasi dimatikan
+            const tomorrow = new Date();
+            tomorrow.setDate(new Date().getDate() + 1);
+            ui.predictionDateInput.value = tomorrow.toISOString().split('T')[0];
+        }
+    }
+
     async function initializeApp() {
         ui.pasaranSelect.addEventListener('change', () => {
             currentPasaran = ui.pasaranSelect.value;
@@ -491,6 +522,9 @@ document.addEventListener('DOMContentLoaded', function() {
         ui.refreshFeatureImportance.addEventListener('click', loadFeatureImportance);
         ui.refreshDriftLog.addEventListener('click', loadDriftLog);
         
+        // UPDATED: Event listener untuk checkbox verifikasi
+        ui.verificationModeCheck.addEventListener('change', toggleVerificationMode);
+
         const today = new Date();
         const tomorrow = new Date();
         tomorrow.setDate(today.getDate() + 1);
@@ -504,6 +538,7 @@ document.addEventListener('DOMContentLoaded', function() {
         
         await updateSystemStatus();
         updateActivePasaranDisplay();
+        toggleVerificationMode(); // Panggil saat inisialisasi
         ui.loadingOverlay.classList.add('hidden');
     }
     
