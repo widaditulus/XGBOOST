@@ -7,8 +7,11 @@ import json
 from flask import Flask, request, jsonify, render_template, abort
 from datetime import datetime
 import threading
-from functools import wraps
+from functools import wraps, lru_cache
 import pandas as pd
+# PERBAIKAN: Impor modul yang diperlukan untuk graceful shutdown
+import signal
+import sys
 
 from predictor import ModelPredictor
 from utils import check_dependencies, logger
@@ -19,8 +22,9 @@ from tuner import HyperparameterTuner
 
 app = Flask(__name__, template_folder='.', static_folder='.', static_url_path='')
 
-predictors_cache = {}
-predictor_lock = threading.Lock()
+# PERBAIKAN: List untuk melacak semua thread yang aktif
+active_threads = []
+
 training_status = {}
 training_lock = threading.Lock()
 evaluation_status = {}
@@ -51,14 +55,15 @@ def validate_pasaran(f):
         return f(*args, **kwargs)
     return decorated_function
 
+@lru_cache(maxsize=10)
 def get_predictor(pasaran: str) -> ModelPredictor:
-    with predictor_lock:
-        if pasaran not in predictors_cache:
-            logger.info(f"CACHE MISS: Membuat instance predictor baru untuk: {pasaran.upper()}")
-            predictors_cache[pasaran] = ModelPredictor(pasaran)
-        else:
-            logger.info(f"CACHE HIT: Menggunakan instance predictor dari cache untuk: {pasaran.upper()}")
-        return predictors_cache[pasaran]
+    """
+    Mengambil atau membuat instance ModelPredictor untuk pasaran tertentu.
+    Cache di-manage oleh LRU untuk mencegah kebocoran memori.
+    lru_cache sudah thread-safe, jadi lock manual tidak diperlukan lagi.
+    """
+    logger.info(f"LRU CACHE: Mengakses predictor untuk: {pasaran.upper()}")
+    return ModelPredictor(pasaran)
 
 @app.route('/')
 def index():
@@ -75,6 +80,19 @@ def data_status(pasaran):
         logger.error(f"Gagal memeriksa status data untuk {pasaran}: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# PERBAIKAN: Wrapper untuk mengelola lifecycle thread
+def manage_thread(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Hapus thread yang sudah tidak aktif dari list
+        active_threads[:] = [t for t in active_threads if t.is_alive()]
+        
+        thread = threading.Thread(target=func, args=args, kwargs=kwargs)
+        thread.daemon = True
+        active_threads.append(thread)
+        thread.start()
+    return wrapper
+
 @app.route('/start-training', methods=['POST'])
 @validate_pasaran
 def start_training(pasaran):
@@ -90,16 +108,16 @@ def start_training(pasaran):
         training_status[pasaran] = 'running'
         training_status[f"{pasaran}_message"] = "Proses training dimulai..."
 
-    thread = threading.Thread(target=run_training_in_background, args=(pasaran, training_mode, use_recency_bias))
-    thread.daemon = True
-    thread.start()
+    # Gunakan wrapper untuk memulai thread
+    run_training_in_background_threaded(pasaran, training_mode, use_recency_bias)
     return jsonify({"status": "success", "message": f"Proses training untuk {pasaran.upper()} telah dimulai."})
 
-def run_training_in_background(pasaran: str, training_mode: str, use_recency_bias: bool):
+@manage_thread
+def run_training_in_background_threaded(pasaran: str, training_mode: str, use_recency_bias: bool):
+    """Fungsi ini sekarang di-wrap oleh manage_thread."""
     try:
         logger.info(f"Memulai thread training untuk pasaran: {pasaran} dengan mode: {training_mode}")
         predictor_to_train = get_predictor(pasaran)
-        # PERBAIKAN: Memanggil train_model tanpa custom_data
         success = predictor_to_train.train_model(training_mode=training_mode, use_recency_bias=use_recency_bias)
         with training_lock:
             if success:
@@ -131,12 +149,11 @@ def start_tuning(pasaran):
         tuning_status[pasaran] = 'running'
         tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter 4D..."
 
-    thread = threading.Thread(target=run_tuning_in_background, args=(pasaran,))
-    thread.daemon = True
-    thread.start()
+    run_tuning_in_background_threaded(pasaran)
     return jsonify({"status": "success", "message": f"Optimasi parameter 4D untuk {pasaran.upper()} telah dimulai."})
 
-def run_tuning_in_background(pasaran: str):
+@manage_thread
+def run_tuning_in_background_threaded(pasaran: str):
     digits = ["as", "kop", "kepala", "ekor"]
     try:
         for digit in digits:
@@ -170,12 +187,11 @@ def start_cb_tuning(pasaran):
         cb_tuning_status[pasaran] = 'running'
         cb_tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter CB..."
 
-    thread = threading.Thread(target=run_cb_tuning_in_background, args=(pasaran,))
-    thread.daemon = True
-    thread.start()
+    run_cb_tuning_in_background_threaded(pasaran)
     return jsonify({"status": "success", "message": f"Optimasi parameter CB untuk {pasaran.upper()} telah dimulai."})
 
-def run_cb_tuning_in_background(pasaran: str):
+@manage_thread
+def run_cb_tuning_in_background_threaded(pasaran: str):
     try:
         for i in range(10):
             digit = str(i)
@@ -221,15 +237,13 @@ def start_evaluation(pasaran):
         evaluation_status[pasaran] = 'running'
         evaluation_status[f"{pasaran}_data"] = None
 
-    # PERBAIKAN: Menambahkan pesan peringatan untuk pengguna
     logger.info(f"Memulai thread evaluasi untuk {pasaran}. Peringatan: Proses ini akan melatih model untuk setiap hari dalam rentang waktu, yang dapat memakan waktu lama.")
     
-    thread = threading.Thread(target=run_evaluation_in_background, args=(pasaran, start_date, end_date, evaluation_mode))
-    thread.daemon = True
-    thread.start()
+    run_evaluation_in_background_threaded(pasaran, start_date, end_date, evaluation_mode)
     return jsonify({"status": "success", "message": f"Proses evaluasi untuk {pasaran.upper()} dimulai. Proses ini akan memakan waktu."})
 
-def run_evaluation_in_background(pasaran: str, start_date: datetime, end_date: datetime, evaluation_mode: str):
+@manage_thread
+def run_evaluation_in_background_threaded(pasaran: str, start_date: datetime, end_date: datetime, evaluation_mode: str):
     try:
         logger.info(f"Memulai thread evaluasi untuk {pasaran} dari {start_date} hingga {end_date} dengan mode '{evaluation_mode}'.")
         predictor = get_predictor(pasaran)
@@ -260,12 +274,11 @@ def update_data(pasaran):
         update_status[pasaran] = 'running'
         update_status[f"{pasaran}_message"] = "Memulai sinkronisasi data..."
 
-    thread = threading.Thread(target=run_data_update_in_background, args=(pasaran,))
-    thread.daemon = True
-    thread.start()
+    run_data_update_in_background_threaded(pasaran)
     return jsonify({"status": "success", "message": f"Sinkronisasi data untuk {pasaran.upper()} telah dimulai."})
 
-def run_data_update_in_background(pasaran: str):
+@manage_thread
+def run_data_update_in_background_threaded(pasaran: str):
     try:
         logger.info(f"Memulai thread update data untuk pasaran: {pasaran}")
         predictor = get_predictor(pasaran)
@@ -287,12 +300,10 @@ def get_update_status(pasaran):
         message = update_status.get(f"{pasaran}_message", "")
     return jsonify({"status": status, "message": message})
 
-# UPDATED: Endpoint /predict sekarang menerima mode evaluasi untuk verifikasi
 @app.route('/predict', methods=['POST'])
 @validate_pasaran
 def predict(pasaran):
     prediction_date_str = request.form.get('prediction_date')
-    # Ambil mode dari form, default ke 'deep' jika tidak ada (untuk prediksi masa depan)
     evaluation_mode = request.form.get('evaluation_mode', 'deep')
     
     if not prediction_date_str:
@@ -300,7 +311,6 @@ def predict(pasaran):
     
     try:
         predictor = get_predictor(pasaran)
-        # Teruskan mode yang diterima ke fungsi inti
         prediction_result = predictor.predict_next_day(
             target_date_str=prediction_date_str, 
             evaluation_mode=evaluation_mode
@@ -354,7 +364,19 @@ def debug_model_status(pasaran):
     }
     return jsonify(status)
 
+# PERBAIKAN: Fungsi signal handler untuk graceful shutdown
+def graceful_shutdown(signum, frame):
+    logger.info("Shutdown signal received. Waiting for active threads to complete...")
+    # Beri waktu beberapa detik bagi thread untuk selesai
+    for thread in active_threads:
+        thread.join(timeout=10.0)
+    logger.info("All active threads have been handled. Exiting.")
+    sys.exit(0)
+
 if __name__ == '__main__':
     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
         check_dependencies()
+        # PERBAIKAN: Daftarkan signal handler
+        signal.signal(signal.SIGINT, graceful_shutdown)
+        signal.signal(signal.SIGTERM, graceful_shutdown)
     app.run(debug=True, use_reloader=False, host='0.0.0.0', port=5000)

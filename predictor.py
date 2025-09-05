@@ -344,26 +344,30 @@ class ModelPredictor:
     def train_model(self, training_mode: str = 'OPTIMIZED', use_recency_bias: bool = True, custom_data: Optional[pd.DataFrame] = None) -> Any:
         logger.info(f"Memulai training untuk {self.pasaran} mode {training_mode}.")
         
-        # [UPDATED] PERBAIKAN FINAL ANTI-DATA LEAKAGE:
-        # Gunakan data yang diberikan secara eksplisit.
-        df_full = custom_data
-        is_evaluation_run = (df_full is not None)
+        is_evaluation_run = (custom_data is not None)
         
-        if not is_evaluation_run:
-            # Jika tidak ada custom_data, ambil data lengkap dari sumber.
+        if is_evaluation_run:
+            df_full = custom_data
+            # PERBAIKAN: Buat instance FeatureProcessor baru yang stateless untuk evaluasi
+            # Ini mencegah state dari satu iterasi evaluasi bocor ke iterasi berikutnya.
+            feature_processor = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
+            training_df = feature_processor.fit_transform(df_full)
+            # Gunakan feature_names dari processor lokal, bukan dari instance (self)
+            current_feature_names = feature_processor.feature_names
+        else:
             df_full = self.data_manager.get_data(force_refresh=True, force_github=True)
             os.makedirs(self.model_dir_base, exist_ok=True)
-        # [END UPDATED]
+            # Untuk training normal, gunakan feature processor dari instance
+            training_df = self.feature_processor.fit_transform(df_full)
+            self.feature_names = self.feature_processor.feature_names
+            current_feature_names = self.feature_names
 
-        training_df = self.feature_processor.fit_transform(df_full)
-        self.feature_names = self.feature_processor.feature_names
-        
         min_samples = self.config["strategy"]["min_training_samples"]
         if len(training_df) < min_samples:
             raise TrainingError(f"Data tidak cukup untuk training. Perlu {min_samples}, tersedia {len(training_df)}.")
         
         if not is_evaluation_run:
-            joblib.dump(self.feature_names, os.path.join(self.model_dir_base, "features.pkl"))
+            joblib.dump(current_feature_names, os.path.join(self.model_dir_base, "features.pkl"))
         
         sample_weights = None
         if use_recency_bias and ADAPTIVE_LEARNING_CONFIG["USE_RECENCY_WEIGHTING"]:
@@ -371,7 +375,7 @@ class ModelPredictor:
             decay_rate = np.log(2) / ADAPTIVE_LEARNING_CONFIG["RECENCY_HALF_LIFE_DAYS"]
             sample_weights = pd.Series(np.exp(-decay_rate * days_since_latest), index=training_df.index)
 
-        X_full = training_df[self.feature_names]
+        X_full = training_df[current_feature_names]
         
         temp_models_4d = {}
         temp_cb_models = {}
@@ -439,7 +443,8 @@ class ModelPredictor:
                     joblib.dump(cb_model, os.path.join(self.model_dir_base, f"model_cb_{digit}.pkl"))
         
         if is_evaluation_run:
-            return temp_models_4d, temp_cb_models, temp_encoders
+            # PERBAIKAN: Kembalikan juga feature_names yang digunakan untuk evaluasi ini
+            return temp_models_4d, temp_cb_models, temp_encoders, current_feature_names
         
         self.models_ready = self.load_models()
         return self.models_ready
@@ -569,7 +574,8 @@ class ModelPredictor:
 
             try:
                 # Latih model sementara untuk evaluasi ini, menggunakan data historis yang sudah difilter
-                temp_models_4d, temp_cb_models, temp_encoders = self.train_model(
+                # PERBAIKAN: Tangkap juga feature_names yang dikembalikan untuk evaluasi
+                temp_models_4d, temp_cb_models, temp_encoders, eval_feature_names = self.train_model(
                     training_mode=evaluation_mode, 
                     custom_data=historical_df
                 )
@@ -581,7 +587,8 @@ class ModelPredictor:
                     evaluation_mode,
                     temp_models_4d,
                     temp_cb_models,
-                    temp_encoders
+                    temp_encoders,
+                    eval_feature_names # PERBAIKAN: Teruskan feature_names yang relevan
                 )
 
                 if pred_result:
@@ -621,9 +628,11 @@ class ModelPredictor:
         
         return {"summary": summary, "results": results_list}
         
-    def _predict_with_custom_models(self, historical_df, target_date, evaluation_mode, custom_models_4d, custom_cb_models, custom_encoders) -> Dict[str, Any]:
-        latest_features = self.feature_processor.transform_for_prediction(historical_df, target_date)
-        latest_features = latest_features.reindex(columns=self.feature_names, fill_value=0)
+    def _predict_with_custom_models(self, historical_df, target_date, evaluation_mode, custom_models_4d, custom_cb_models, custom_encoders, feature_names) -> Dict[str, Any]:
+        # PERBAIKAN: Gunakan FeatureProcessor lokal untuk transformasi prediksi agar stateless
+        eval_feature_processor = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
+        latest_features = eval_feature_processor.transform_for_prediction(historical_df, target_date)
+        latest_features = latest_features.reindex(columns=feature_names, fill_value=0)
         
         predictions = {}
         all_4d_probas = {}
