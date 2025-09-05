@@ -30,11 +30,11 @@ PASARAN_DISPLAY_MAPPING = {
 # Anda bisa mengubah ini kapan saja tanpa perlu mengubah kode lain.
 CB_STRATEGY_CONFIG = {
     "sydney": "dedicated",
-    "sgp": "aggregated",
-    "hk": "aggregated",
-    "taiwan": "aggregated",
-    "china": "aggregated",
-    "magnum": "aggregated"
+    "sgp": "dedicated",
+    "hk": "dedicated",
+    "taiwan": "dedicated",
+    "china": "dedicated",
+    "magnum": "dedicated",
 }
 
 MARKET_CONFIGS = {
