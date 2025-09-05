@@ -629,18 +629,30 @@ class ModelPredictor:
         all_4d_probas = {}
         
         for d in self.digits:
-            model = custom_models_4d.get(d)
             encoder = custom_encoders.get(d)
-            if not model or not encoder:
-                raise PredictionError(f"Model atau encoder untuk '{d}' tidak tersedia.")
+            if not encoder:
+                raise PredictionError(f"Encoder untuk '{d}' tidak tersedia.")
             
             if evaluation_mode == 'deep':
-                # Untuk saat ini, kita hanya akan menggunakan model utama (XGBoost) untuk evaluasi mode deep
-                # demi menghindari kompleksitas dan waktu yang sangat lama
-                probabilities = model.predict_proba(latest_features)[0]
+                # Perbaikan: Menggunakan ensemble_helper untuk mode 'deep'
+                active_models = {'xgb': custom_models_4d.get(d)}
+                rf_model_path = os.path.join(self.model_dir_base, f"rf_model_{d}.pkl")
+                if os.path.exists(rf_model_path):
+                    active_models['rf'] = joblib.load(rf_model_path)
+                lgbm_model_path = os.path.join(self.model_dir_base, f"lgbm_model_{d}.pkl")
+                if os.path.exists(lgbm_model_path):
+                    active_models['lgbm'] = joblib.load(lgbm_model_path)
+                
+                loaded_models = {name: model for name, model in active_models.items() if model is not None}
+                if not loaded_models:
+                     raise PredictionError(f"Tidak ada model yang termuat untuk digit '{d}'.")
+                probabilities = ensemble_predict_proba(loaded_models, latest_features)[0]
             else: # mode 'quick'
+                model = custom_models_4d.get(d)
+                if not model:
+                     raise PredictionError(f"Model XGBoost tidak ditemukan untuk digit '{d}'.")
                 probabilities = model.predict_proba(latest_features)[0]
-            
+
             all_4d_probas[d] = probabilities
             top_indices = np.argsort(probabilities)[::-1]
             top_three_digits = encoder.inverse_transform(top_indices[:3])
@@ -658,7 +670,7 @@ class ModelPredictor:
             "prediction_date": target_date.strftime("%Y-%m-%d"),
             "final_4d_prediction": f"{predictions['as'][0]}{predictions['kop'][0]}{predictions['kepala'][0]}{predictions['ekor'][0]}",
             "kandidat_as": ", ".join(predictions['as']),
-            "kandidat_kop": ", ".join(predictions['kop']),
+            "kandidat_kop": ", ". join(predictions['kop']),
             "kandidat_kepala": ", ".join(predictions['kepala']),
             "kandidat_ekor": ", ".join(predictions['ekor']),
             "angka_main": ", ".join(angka_main),

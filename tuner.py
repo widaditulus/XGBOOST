@@ -1,5 +1,5 @@
 # tuner.py (Final - Anti Data Leakage Absolut)
-
+# BEJO
 # -*- coding: utf-8 -*-
 import os
 import json
@@ -11,6 +11,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import log_loss
 
+# Mengimpor FeatureProcessor dan DataManager yang benar dari predictor
 from predictor import FeatureProcessor, DataManager
 from utils import logger, error_handler
 from constants import MODELS_DIR, MARKET_CONFIGS
@@ -31,6 +32,7 @@ class HyperparameterTuner:
         self.best_params_ = None
         logger.info(f"TUNER: Mode '{self.mode}' untuk pasaran '{self.pasaran}' digit '{self.digit}'.")
         data_manager = DataManager(self.pasaran)
+        # Mengambil data mentah. Ini akan digunakan untuk split di _objective
         self.df_raw = data_manager.get_data(force_refresh=True, force_github=True)
         self.config = MARKET_CONFIGS[self.pasaran]
         
@@ -62,34 +64,54 @@ class HyperparameterTuner:
         cv = TimeSeriesSplit(n_splits=TUNING_CONFIG["N_SPLITS"])
         logloss_scores = []
         
-        for train_idx, val_idx in cv.split(self.df_raw):
-            train_raw_df = self.df_raw.iloc[train_idx]
-            val_raw_df = self.df_raw.iloc[val_idx]
+        # JANGAN MENGGUNAKAN `fit` dan `transform` yang tidak ada.
+        # Gunakan `fit_transform` pada data train dan `transform_for_prediction` pada data validasi
+        # untuk mencegah kebocoran data.
+        fp = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
+        processed_df = fp.fit_transform(self.df_raw.copy())
+        
+        # Ambil nama-nama fitur yang sudah diproses
+        feature_names = fp.feature_names
+
+        if self.mode == '4D':
+            target_col = self.digit
+            le = LabelEncoder().fit(processed_df[target_col])
+            all_labels = le.classes_
+        else:
+            target_col = f'cb_target_{self.digit}'
+            # Untuk CB, label hanya 0 dan 1
+            all_labels = [0, 1]
             
-            fp = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
-            fp.fit(train_raw_df)
+        # Pisahkan data target dan fitur
+        X_full = processed_df[feature_names]
+        y_full = processed_df[target_col]
+
+        for train_idx, val_idx in cv.split(X_full):
+            X_train, X_val = X_full.iloc[train_idx], X_full.iloc[val_idx]
+            y_train, y_val = y_full.iloc[train_idx], y_full.iloc[val_idx]
             
-            train_processed_df = fp.transform(train_raw_df)
-            val_processed_df = fp.transform(val_raw_df)
-            
-            X_train = train_processed_df[fp.feature_names]
-            X_val = val_processed_df[fp.feature_names]
+            # Pastikan ada data di train dan val set
+            if X_train.empty or X_val.empty:
+                continue
 
             if self.mode == '4D':
-                le = LabelEncoder().fit(train_processed_df[self.digit])
-                y_train = le.transform(train_processed_df[self.digit])
-                y_val = le.transform(val_processed_df[self.digit])
+                # Pastikan LabelEncoder dapat menangani semua label
+                y_train_encoded = le.transform(y_train)
+                y_val_encoded = le.transform(y_val)
             else:
-                y_train = train_processed_df[f'cb_target_{self.digit}']
-                y_val = val_processed_df[f'cb_target_{self.digit}']
+                y_train_encoded = y_train
+                y_val_encoded = y_val
 
             model = xgb.XGBClassifier(**params)
-            model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+            model.fit(X_train, y_train_encoded, eval_set=[(X_val, y_val_encoded)], verbose=False)
             
             preds = model.predict_proba(X_val)
-            all_labels = np.unique(np.concatenate((y_train, y_val)))
-            loss = log_loss(y_val, preds, labels=all_labels)
+            loss = log_loss(y_val_encoded, preds, labels=range(len(all_labels)))
             logloss_scores.append(loss)
+            
+        if not logloss_scores:
+            logger.warning(f"TUNER: Tidak ada data validasi yang cukup untuk {self.mode}-{self.digit}. Kembali ke infinity.")
+            return float('inf')
         return np.mean(logloss_scores)
 
     @error_handler(logger)
@@ -128,6 +150,6 @@ class HyperparameterTuner:
         logger.info(f"TUNER: Parameter terbaik untuk {self.mode}-{self.digit} disimpan di {file_path}")
         
     def log_progress(self, study, trial):
-        n_trials = TUNING_CONFIG['N_TRIALS_4D'] if self.mode == 'D' else TUNING_CONFIG['N_TRIALS_CB']
+        n_trials = TUNING_CONFIG['N_TRIALS_4D'] if self.mode == '4D' else TUNING_CONFIG['N_TRIALS_CB']
         best_value = study.best_value if study.best_trial else float('inf')
         logger.info(f"TUNER [{self.pasaran}-{self.digit}-{self.mode}]: Trial {trial.number}/{n_trials} | Logloss: {trial.value:.4f} | Best: {best_value:.4f}")
