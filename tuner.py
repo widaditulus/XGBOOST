@@ -10,6 +10,9 @@ import xgboost as xgb
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import log_loss
+# PERBAIKAN: Impor gc untuk garbage collection dan time untuk jeda
+import gc
+import time
 
 # Mengimpor FeatureProcessor dan DataManager yang benar dari predictor
 from predictor import FeatureProcessor, DataManager
@@ -64,13 +67,9 @@ class HyperparameterTuner:
         cv = TimeSeriesSplit(n_splits=TUNING_CONFIG["N_SPLITS"])
         logloss_scores = []
         
-        # JANGAN MENGGUNAKAN `fit` dan `transform` yang tidak ada.
-        # Gunakan `fit_transform` pada data train dan `transform_for_prediction` pada data validasi
-        # untuk mencegah kebocoran data.
         fp = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
         processed_df = fp.fit_transform(self.df_raw.copy())
         
-        # Ambil nama-nama fitur yang sudah diproses
         feature_names = fp.feature_names
 
         if self.mode == '4D':
@@ -79,10 +78,8 @@ class HyperparameterTuner:
             all_labels = le.classes_
         else:
             target_col = f'cb_target_{self.digit}'
-            # Untuk CB, label hanya 0 dan 1
             all_labels = [0, 1]
             
-        # Pisahkan data target dan fitur
         X_full = processed_df[feature_names]
         y_full = processed_df[target_col]
 
@@ -90,12 +87,10 @@ class HyperparameterTuner:
             X_train, X_val = X_full.iloc[train_idx], X_full.iloc[val_idx]
             y_train, y_val = y_full.iloc[train_idx], y_full.iloc[val_idx]
             
-            # Pastikan ada data di train dan val set
             if X_train.empty or X_val.empty:
                 continue
 
             if self.mode == '4D':
-                # Pastikan LabelEncoder dapat menangani semua label
                 y_train_encoded = le.transform(y_train)
                 y_val_encoded = le.transform(y_val)
             else:
@@ -116,19 +111,34 @@ class HyperparameterTuner:
 
     @error_handler(logger)
     def run_tuning(self) -> dict:
-        storage_name = f"sqlite:///{self.pasaran}_{self.digit}_{self.mode}_tuning.db"
-        self.study = optuna.create_study(direction='minimize', study_name=f"{self.pasaran}_{self.digit}_{self.mode}", storage=storage_name, load_if_exists=True)
+        db_file_name = f"{self.pasaran}_{self.digit}_{self.mode}_tuning.db"
+        storage_name = f"sqlite:///{db_file_name}"
+        
+        study = optuna.create_study(direction='minimize', study_name=f"{self.pasaran}_{self.digit}_{self.mode}", storage=storage_name, load_if_exists=True)
         n_trials = TUNING_CONFIG['N_TRIALS_4D'] if self.mode == '4D' else TUNING_CONFIG['N_TRIALS_CB']
+        
         logger.info(f"TUNER: Memulai optimasi {self.mode} untuk {self.pasaran}-{self.digit}. Trials: {n_trials}")
-        self.study.optimize(self._objective, n_trials=n_trials, timeout=TUNING_CONFIG["TIMEOUT"], callbacks=[self.log_progress])
-        self.best_params_ = self.study.best_params
-        logger.info(f"TUNER: Optimasi selesai. Best score (logloss): {self.study.best_value:.4f}")
+        study.optimize(self._objective, n_trials=n_trials, timeout=TUNING_CONFIG["TIMEOUT"], callbacks=[self.log_progress])
+        
+        self.best_params_ = study.best_params
+        logger.info(f"TUNER: Optimasi selesai. Best score (logloss): {study.best_value:.4f}")
         self.save_best_params()
+        
         try:
-            db_file = f"{self.pasaran}_{self.digit}_{self.mode}_tuning.db"
-            if os.path.exists(db_file): os.remove(db_file)
+            # PERBAIKAN FINAL: Hancurkan objek studi dan panggil garbage collector
+            # untuk memaksa pelepasan handle file database.
+            del study
+            gc.collect()
+            
+            # Beri jeda 1 detik untuk memastikan OS Windows sempat melepaskan file lock.
+            time.sleep(1)
+
+            if os.path.exists(db_file_name):
+                 os.remove(db_file_name)
+                 logger.info(f"TUNER: File DB sementara '{db_file_name}' berhasil dihapus.")
         except OSError as e:
-            logger.warning(f"TUNER: Gagal menghapus file DB: {e}")
+            logger.warning(f"TUNER: Gagal menghapus file DB sementara '{db_file_name}': {e}")
+            
         return self.best_params_
 
     def save_best_params(self):
