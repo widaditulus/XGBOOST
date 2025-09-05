@@ -1,5 +1,5 @@
 # constants.py (Final - Lengkap dengan Konfigurasi Strategi CB)
-
+# BEJO
 # -*- coding: utf-8 -*-
 import os
 
@@ -90,12 +90,6 @@ CONTINUAL_LEARNING_CONFIG = {
     "ENABLED": True,
     "AUTO_TRIGGER_ENABLED": True,
     "WINDOW_DAYS": 30
-}
-
-HYBRID_SCORING_CONFIG = {
-    "ENABLED": True,
-    "AI_SCORE_WEIGHT": 0.8, 
-    "HISTORICAL_SCORE_WEIGHT": 0.2,
 }
 
 TRAINING_PENALTY_CONFIG = {

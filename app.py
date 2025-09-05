@@ -1,5 +1,5 @@
 # app.py (Final - Mendukung Mode Prediksi Fleksibel)
-
+# BEJO
 # -*- coding: utf-8 -*-
 import os
 import traceback
@@ -99,6 +99,7 @@ def run_training_in_background(pasaran: str, training_mode: str, use_recency_bia
     try:
         logger.info(f"Memulai thread training untuk pasaran: {pasaran} dengan mode: {training_mode}")
         predictor_to_train = get_predictor(pasaran)
+        # PERBAIKAN: Memanggil train_model tanpa custom_data
         success = predictor_to_train.train_model(training_mode=training_mode, use_recency_bias=use_recency_bias)
         with training_lock:
             if success:
@@ -220,10 +221,13 @@ def start_evaluation(pasaran):
         evaluation_status[pasaran] = 'running'
         evaluation_status[f"{pasaran}_data"] = None
 
+    # PERBAIKAN: Menambahkan pesan peringatan untuk pengguna
+    logger.info(f"Memulai thread evaluasi untuk {pasaran}. Peringatan: Proses ini akan melatih model untuk setiap hari dalam rentang waktu, yang dapat memakan waktu lama.")
+    
     thread = threading.Thread(target=run_evaluation_in_background, args=(pasaran, start_date, end_date, evaluation_mode))
     thread.daemon = True
     thread.start()
-    return jsonify({"status": "success", "message": f"Proses evaluasi untuk {pasaran.upper()} dimulai."})
+    return jsonify({"status": "success", "message": f"Proses evaluasi untuk {pasaran.upper()} dimulai. Proses ini akan memakan waktu."})
 
 def run_evaluation_in_background(pasaran: str, start_date: datetime, end_date: datetime, evaluation_mode: str):
     try:

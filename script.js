@@ -370,7 +370,10 @@ document.addEventListener('DOMContentLoaded', function() {
         btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
         updateActivePasaranDisplay();
         ui.evaluationResultArea.style.display = 'block';
-        ui.evaluationStatus.innerHTML = `<div class="spinner-border text-info" role="status"></div><p class="mt-2">Menjalankan evaluasi...</p>`;
+        
+        // PERBAIKAN: Menambahkan pesan peringatan untuk pengguna
+        ui.evaluationStatus.innerHTML = `<div class="alert alert-warning text-center fw-bold">Peringatan: Proses ini akan melatih model untuk setiap hari. Ini akan memakan waktu lama, namun hasilnya akurat!</div><div class="spinner-border text-info" role="status"></div><p class="mt-2">Menjalankan evaluasi...</p>`;
+
         ui.evaluationDetailTableBody.innerHTML = '';
         ui.evaluationSummaryCards.style.display = 'none';
         
