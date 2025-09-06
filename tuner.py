@@ -67,29 +67,41 @@ class HyperparameterTuner:
         cv = TimeSeriesSplit(n_splits=TUNING_CONFIG["N_SPLITS"])
         logloss_scores = []
         
-        fp = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
-        processed_df = fp.fit_transform(self.df_raw.copy())
-        
-        feature_names = fp.feature_names
+        # PERBAIKAN: Logika rekayasa fitur dipindahkan ke dalam loop TimeSeriesSplit
+        # untuk mencegah data leakage sekecil apa pun. Fitur (misal: rolling mean)
+        # untuk setiap fold kini hanya dihitung berdasarkan data yang tersedia hingga saat itu.
+        for train_idx, val_idx in cv.split(self.df_raw):
+            # 1. Ambil data mentah HANYA untuk fold saat ini (train + validasi)
+            # Ini memastikan tidak ada data dari masa depan (fold berikutnya) yang ikut terproses.
+            current_fold_raw_df = self.df_raw.iloc[:val_idx[-1] + 1].copy()
 
-        if self.mode == '4D':
-            target_col = self.digit
-            le = LabelEncoder().fit(processed_df[target_col])
-            all_labels = le.classes_
-        else:
-            target_col = f'cb_target_{self.digit}'
-            all_labels = [0, 1]
+            # 2. Lakukan rekayasa fitur pada data fold saat ini.
+            # Instance FeatureProcessor dibuat baru setiap iterasi (stateless).
+            fp = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
+            processed_fold_df = fp.fit_transform(current_fold_raw_df)
             
-        X_full = processed_df[feature_names]
-        y_full = processed_df[target_col]
+            # 3. Dapatkan kembali index yang sesuai dari dataframe yang sudah diproses.
+            # Hal ini diperlukan karena `fit_transform` dapat menghapus baris awal (misal: karena data tidak cukup untuk rolling window).
+            train_rows = processed_fold_df.index.intersection(train_idx)
+            val_rows = processed_fold_df.index.intersection(val_idx)
 
-        for train_idx, val_idx in cv.split(X_full):
-            X_train, X_val = X_full.iloc[train_idx], X_full.iloc[val_idx]
-            y_train, y_val = y_full.iloc[train_idx], y_full.iloc[val_idx]
-            
-            if X_train.empty or X_val.empty:
+            if len(train_rows) == 0 or len(val_rows) == 0:
                 continue
 
+            feature_names = fp.feature_names
+            if self.mode == '4D':
+                target_col = self.digit
+                le = LabelEncoder().fit(processed_fold_df[target_col])
+                all_labels = le.classes_
+            else:
+                target_col = f'cb_target_{self.digit}'
+                all_labels = [0, 1]
+
+            X_train = processed_fold_df.loc[train_rows, feature_names]
+            y_train = processed_fold_df.loc[train_rows, target_col]
+            X_val = processed_fold_df.loc[val_rows, feature_names]
+            y_val = processed_fold_df.loc[val_rows, target_col]
+            
             if self.mode == '4D':
                 y_train_encoded = le.transform(y_train)
                 y_val_encoded = le.transform(y_val)
