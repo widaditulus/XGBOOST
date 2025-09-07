@@ -48,6 +48,38 @@ def train_ensemble_models(X, y_encoded, model_dir_base, digit):
             except Exception as e:
                 logger.error(f"Terjadi error pada thread training ensemble: {e}")
 
+# --- FUNGSI BARU UNTUK EVALUASI YANG AKURAT ---
+def train_temporary_ensemble_models(X, y_encoded, digit):
+    """
+    Melatih model komplementer (RF & LGBM) dan mengembalikannya secara langsung
+    TANPA menyimpan ke disk. Digunakan khusus untuk evaluasi backtesting.
+    """
+    rf_params = ENSEMBLE_CONFIG.get("rf_params", {})
+    lgbm_params = ENSEMBLE_CONFIG.get("lgbm_params", {})
+    
+    temp_rf_model, temp_lgbm_model = None, None
+
+    try:
+        # Latih model Random Forest
+        logger.info(f"EVAL: Melatih model RF sementara untuk digit {digit}.")
+        rf = RandomForestClassifier(**rf_params)
+        rf.fit(X, y_encoded)
+        temp_rf_model = rf
+    except Exception as e:
+        logger.error(f"EVAL: Gagal melatih model RF sementara untuk digit {digit}: {e}")
+
+    try:
+        # Latih model LightGBM
+        logger.info(f"EVAL: Melatih model LGBM sementara untuk digit {digit}.")
+        lgbm = lgb.LGBMClassifier(**lgbm_params)
+        lgbm.fit(X, y_encoded)
+        temp_lgbm_model = lgbm
+    except Exception as e:
+        logger.error(f"EVAL: Gagal melatih model LGBM sementara untuk digit {digit}: {e}")
+        
+    return temp_rf_model, temp_lgbm_model
+# -----------------------------------------------
+
 def ensemble_predict_proba(models, X):
     """
     Mengambil prediksi probabilitas dari beberapa model dan merata-ratakannya.

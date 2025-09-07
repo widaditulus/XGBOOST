@@ -1,4 +1,4 @@
-# predictor.py (Final - Anti Data Leakage Absolut)
+# predictor.py (Final - Lengkap dengan Fitur Angka Berulang dan Pengetahuan Lainnya)
 # BEJO
 # -*- coding: utf-8 -*-
 import os
@@ -26,7 +26,7 @@ from model_config import TRAINING_CONFIG_OPTIONS, XGB_PARAMS_CB
 from exceptions import TrainingError, PredictionError, DataFetchingError
 from data_fetcher import DataFetcher
 from evaluation import calculate_brier_score, calculate_ece
-from ensemble_helper import train_ensemble_models, ensemble_predict_proba
+from ensemble_helper import train_ensemble_models, ensemble_predict_proba, train_temporary_ensemble_models
 from continual_learner import ContinualLearner
 
 class DataManager:
@@ -130,6 +130,17 @@ class FeatureProcessor:
         
         new_features = {}
         digit_cols = df[self.digits]
+        
+        logger.info("Membuat fitur 'Pengetahuan Angka Berpasangan'...")
+        new_features['as_kop_sum_prev'] = (df['as'] + df['kop']).shift(1)
+        new_features['as_kop_diff_prev'] = (df['as'] - df['kop']).shift(1)
+        new_features['as_kop_mul_prev'] = (df['as'] * df['kop']).shift(1)
+        new_features['kepala_ekor_sum_prev'] = (df['kepala'] + df['ekor']).shift(1)
+        new_features['kepala_ekor_diff_prev'] = (df['kepala'] - df['ekor']).shift(1)
+        new_features['kepala_ekor_mul_prev'] = (df['kepala'] * df['ekor']).shift(1)
+        new_features['as_ekor_sum_prev'] = (df['as'] + df['ekor']).shift(1)
+        new_features['kop_kepala_sum_prev'] = (df['kop'] + df['kepala']).shift(1)
+        
         new_features['digit_sum_prev'] = digit_cols.sum(axis=1).shift(1)
         new_features['even_count_prev'] = (digit_cols % 2 == 0).sum(axis=1).shift(1)
         new_features['odd_count_prev'] = (digit_cols % 2 != 0).sum(axis=1).shift(1)
@@ -140,10 +151,7 @@ class FeatureProcessor:
         new_features['is_weekend'] = df['date'].dt.dayofweek.isin([5, 6]).astype(int)
         new_features['day_sin'] = np.sin(2 * np.pi * df['date'].dt.dayofweek / 6.0)
         new_features['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek / 6.0)
-        new_features['as_kop_sum_prev'] = (df['as'] + df['kop']).shift(1)
-        new_features['kepala_ekor_diff_prev'] = (df['kepala'] - df['ekor']).shift(1)
-        new_features['as_mul_kop_prev'] = (df['as'] * df['kop']).shift(1)
-        new_features['kepala_mul_ekor_prev'] = (df['kepala'] * df['ekor']).shift(1)
+        
         vol_window = self.feature_config.get("volatility_window", 10)
         adv_window = 30
         for d in self.digits:
@@ -158,6 +166,38 @@ class FeatureProcessor:
         for d in self.digits:
             for i in range(1, self.timesteps + 1):
                 new_features[f'{d}_lag_{i}'] = df[d].shift(i)
+        
+        logger.info("Membuat fitur 'Panas & Dingin' (Frekuensi & Keterlambatan)...")
+        for d in self.digits:
+            for num in range(10):
+                is_num = (df[d] == num)
+                new_features[f'{d}_{num}_freq_30d'] = is_num.shift(1).rolling(window=30, min_periods=1).sum()
+                not_is_num = (df[d] != num)
+                new_features[f'{d}_{num}_days_since_seen'] = not_is_num.groupby(not_is_num.cumsum()).cumcount()
+
+        logger.info("Membuat fitur 'Pengetahuan Kontekstual'...")
+        shifted_digits = df[self.digits].shift(1)
+        new_features['unique_digits_prev'] = shifted_digits.nunique(axis=1)
+        new_features['range_prev'] = shifted_digits.max(axis=1) - shifted_digits.min(axis=1)
+        new_features['twin_count_prev'] = shifted_digits.apply(lambda row: row.value_counts().gt(1).sum(), axis=1)
+
+        logger.info("Membuat fitur 'Pengetahuan Momentum' (Fitur Delta)...")
+        for d in self.digits:
+            short_ma = df[d].shift(1).rolling(window=7, min_periods=1).mean()
+            long_ma = df[d].shift(1).rolling(window=30, min_periods=1).mean()
+            new_features[f'{d}_delta_ma_7_30'] = short_ma - long_ma
+
+        # --- PENAMBAHAN FITUR BARU: PENGETAHUAN ANGKA BERULANG ---
+        logger.info("Membuat fitur 'Pengetahuan Angka Berulang'...")
+        # Fitur untuk mendeteksi apakah digit yang sama muncul lagi dari hari sebelumnya
+        for d in self.digits:
+            new_features[f'{d}_is_repeating_prev'] = (df[d] == df[d].shift(1)).astype(int).shift(1)
+        
+        # Fitur untuk mendeteksi angka kembar di posisi tertentu pada hasil kemarin
+        new_features['as_kop_is_twin_prev'] = (df['as'] == df['kop']).astype(int).shift(1)
+        new_features['kepala_ekor_is_twin_prev'] = (df['kepala'] == df['ekor']).astype(int).shift(1)
+        # -----------------------------------------------------------
+
         df_features = pd.DataFrame(new_features, index=df.index)
         training_df = pd.concat([df, df_features], axis=1)
         
@@ -169,49 +209,19 @@ class FeatureProcessor:
         return training_df
 
     def transform_for_prediction(self, historical_df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
-        if len(historical_df) < self.timesteps:
-            raise PredictionError(f"Data historis tidak cukup ({len(historical_df)} baris) untuk membuat prediksi.")
-        last_known_data = historical_df.iloc[-self.timesteps:].copy()
-        for i, digit in enumerate(self.digits):
-            last_known_data[digit] = last_known_data["result"].str[i].astype('int8')
-        pred_vector = {}
-        last_row = last_known_data.iloc[-1]
+        required_len = max(self.timesteps, 30) + 1 
+        if len(historical_df) < required_len:
+            raise PredictionError(f"Data historis tidak cukup ({len(historical_df)}) untuk prediksi. Perlu {required_len}.")
 
-        last_digits = last_row[self.digits].values
-        pred_vector['digit_sum_prev'] = last_digits.sum()
-        pred_vector['even_count_prev'] = np.sum(last_digits % 2 == 0)
-        pred_vector['odd_count_prev'] = np.sum(last_digits % 2 != 0)
-        pred_vector['low_count_prev'] = np.sum(last_digits < 5)
-        pred_vector['high_count_prev'] = np.sum(last_digits >= 5)
+        pred_row = pd.DataFrame([{'date': target_date, 'result': '0000'}])
+        df_for_calc = pd.concat([historical_df.iloc[-required_len:], pred_row], ignore_index=True)
+        df_for_calc['date'] = pd.to_datetime(df_for_calc['date'])
         
-        pred_vector['dayofweek'] = target_date.dayofweek
-        pred_vector['is_weekend'] = 1 if target_date.dayofweek in [5, 6] else 0
-        pred_vector['day_sin'] = np.sin(2 * np.pi * target_date.dayofweek / 6.0)
-        pred_vector['day_cos'] = np.cos(2 * np.pi * target_date.dayofweek / 6.0)
-        pred_vector['as_kop_sum_prev'] = last_row['as'] + last_row['kop']
-        pred_vector['kepala_ekor_diff_prev'] = last_row['kepala'] - last_row['ekor']
-        # --- PERBAIKAN BUG: 'numpy.int8' object has no attribute 'shift' ---
-        # Menggunakan data dari baris terakhir (current last row) untuk menghitung fitur
-        pred_vector['as_mul_kop_prev'] = last_row['as'] * last_row['kop']
-        pred_vector['kepala_mul_ekor_prev'] = last_row['kepala'] * last_row['ekor']
+        df_with_features = self.fit_transform(df_for_calc)
         
-        vol_window = self.feature_config.get("volatility_window", 10)
-        adv_window = 30
-        for d in self.digits:
-            shifted_d = last_known_data[d]
-            pred_vector[f'{d}_skew_{vol_window}_prev'] = shifted_d.rolling(vol_window).skew().iloc[-1]
-            pred_vector[f'{d}_kurt_{vol_window}_prev'] = shifted_d.rolling(vol_window).kurt().iloc[-1]
-            rolling_mean = shifted_d.rolling(window=adv_window, min_periods=1).mean().iloc[-1]
-            rolling_std = shifted_d.rolling(window=adv_window, min_periods=1).std().replace(0, 1).iloc[-1]
-            pred_vector[f'{d}_zscore_prev'] = (last_row[d] - rolling_mean) / rolling_std
-            pred_vector[f'{d}_streak_prev'] = self._calculate_streak(shifted_d).iloc[-1]
-            pred_vector[f'{d}_trend_change_prev'] = self._detect_trend_changes(shifted_d).iloc[-1]
-        for d in self.digits:
-            for i in range(1, self.timesteps + 1):
-                pred_vector[f'{d}_lag_{i}'] = last_known_data[d].iloc[-i]
-        
-        df_pred = pd.DataFrame([pred_vector])
-        return df_pred.fillna(0)
+        prediction_vector = df_with_features.iloc[[-1]][self.feature_names]
+
+        return prediction_vector
 
 class ModelTrainer:
     def __init__(self, digits, training_params, pasaran):
@@ -348,16 +358,12 @@ class ModelPredictor:
         
         if is_evaluation_run:
             df_full = custom_data
-            # PERBAIKAN: Buat instance FeatureProcessor baru yang stateless untuk evaluasi
-            # Ini mencegah state dari satu iterasi evaluasi bocor ke iterasi berikutnya.
             feature_processor = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
             training_df = feature_processor.fit_transform(df_full)
-            # Gunakan feature_names dari processor lokal, bukan dari instance (self)
             current_feature_names = feature_processor.feature_names
         else:
             df_full = self.data_manager.get_data(force_refresh=True, force_github=True)
             os.makedirs(self.model_dir_base, exist_ok=True)
-            # Untuk training normal, gunakan feature processor dari instance
             training_df = self.feature_processor.fit_transform(df_full)
             self.feature_names = self.feature_processor.feature_names
             current_feature_names = self.feature_names
@@ -380,6 +386,8 @@ class ModelPredictor:
         temp_models_4d = {}
         temp_cb_models = {}
         temp_encoders = {}
+        temp_rf_models = {}
+        temp_lgbm_models = {}
 
         logger.info("--- Memulai Training Model 4D ---")
         for digit in self.digits:
@@ -415,6 +423,8 @@ class ModelPredictor:
                         train_ensemble_models(X_full, y_encoded, self.model_dir_base, digit)
 
                     self._check_for_drift(digit)
+                elif is_evaluation_run and training_mode == 'deep':
+                    temp_rf_models[digit], temp_lgbm_models[digit] = train_temporary_ensemble_models(X_full, y_encoded, digit)
 
         logger.info("--- Memulai Training Model Colok Bebas (CB) ---")
         for i in range(10):
@@ -443,8 +453,7 @@ class ModelPredictor:
                     joblib.dump(cb_model, os.path.join(self.model_dir_base, f"model_cb_{digit}.pkl"))
         
         if is_evaluation_run:
-            # PERBAIKAN: Kembalikan juga feature_names yang digunakan untuk evaluasi ini
-            return temp_models_4d, temp_cb_models, temp_encoders, current_feature_names
+            return temp_models_4d, temp_cb_models, temp_encoders, current_feature_names, temp_rf_models, temp_lgbm_models
         
         self.models_ready = self.load_models()
         return self.models_ready
@@ -551,6 +560,8 @@ class ModelPredictor:
     
     @error_handler(logger)
     def evaluate_performance(self, start_date: datetime, end_date: datetime, evaluation_mode: str = 'quick') -> Dict[str, Any]:
+        RETRAIN_INTERVAL_DAYS = 7 
+
         full_df = self.data_manager.get_data()
         eval_range = full_df[(full_df['date'] >= start_date) & (full_df['date'] <= end_date)].copy()
         
@@ -559,13 +570,15 @@ class ModelPredictor:
             
         results_list = []
         
-        logger.info(f"Memulai evaluasi backtesting untuk {len(eval_range)} hari.")
+        temp_models = None
+        last_retrain_date = None
+
+        logger.info(f"Memulai evaluasi EFISIEN (retrain setiap {RETRAIN_INTERVAL_DAYS} hari) untuk {len(eval_range)} hari.")
         
         for index, row in eval_range.iterrows():
             eval_date = row['date']
             actual_result = row['result']
             
-            # Pastikan data historis hanya sampai H-1 dari tanggal evaluasi.
             historical_df = full_df[full_df['date'] < eval_date].copy()
             
             if historical_df.empty:
@@ -573,14 +586,16 @@ class ModelPredictor:
                 continue
 
             try:
-                # Latih model sementara untuk evaluasi ini, menggunakan data historis yang sudah difilter
-                # PERBAIKAN: Tangkap juga feature_names yang dikembalikan untuk evaluasi
-                temp_models_4d, temp_cb_models, temp_encoders, eval_feature_names = self.train_model(
-                    training_mode=evaluation_mode, 
-                    custom_data=historical_df
-                )
+                if temp_models is None or (eval_date - last_retrain_date).days >= RETRAIN_INTERVAL_DAYS:
+                    logger.info(f"MELATIH ULANG MODEL untuk periode yang dimulai pada {eval_date.strftime('%Y-%m-%d')}")
+                    temp_models = self.train_model(
+                        training_mode=evaluation_mode, 
+                        custom_data=historical_df
+                    )
+                    last_retrain_date = eval_date
 
-                # Gunakan model sementara untuk prediksi
+                temp_models_4d, temp_cb_models, temp_encoders, eval_feature_names, temp_rf_models, temp_lgbm_models = temp_models
+
                 pred_result = self._predict_with_custom_models(
                     historical_df,
                     eval_date,
@@ -588,7 +603,9 @@ class ModelPredictor:
                     temp_models_4d,
                     temp_cb_models,
                     temp_encoders,
-                    eval_feature_names # PERBAIKAN: Teruskan feature_names yang relevan
+                    eval_feature_names,
+                    temp_rf_models,
+                    temp_lgbm_models
                 )
 
                 if pred_result:
@@ -612,6 +629,7 @@ class ModelPredictor:
         
         def check_am(a, p): return any(d in a for d in p.replace(' ','').split(',')) if isinstance(p, str) and a else False
         def check_cb(a, p): return p in a if isinstance(p, str) and a else False
+
         am_accuracy = eval_summary_df.apply(lambda r: check_am(r['actual'], r['angka_main']), axis=1).mean()
         cb_accuracy = eval_summary_df.apply(lambda r: check_cb(r['actual'], r['colok_bebas']), axis=1).mean()
         
@@ -628,8 +646,7 @@ class ModelPredictor:
         
         return {"summary": summary, "results": results_list}
         
-    def _predict_with_custom_models(self, historical_df, target_date, evaluation_mode, custom_models_4d, custom_cb_models, custom_encoders, feature_names) -> Dict[str, Any]:
-        # PERBAIKAN: Gunakan FeatureProcessor lokal untuk transformasi prediksi agar stateless
+    def _predict_with_custom_models(self, historical_df, target_date, evaluation_mode, custom_models_4d, custom_cb_models, custom_encoders, feature_names, custom_rf_models, custom_lgbm_models) -> Dict[str, Any]:
         eval_feature_processor = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
         latest_features = eval_feature_processor.transform_for_prediction(historical_df, target_date)
         latest_features = latest_features.reindex(columns=feature_names, fill_value=0)
@@ -643,15 +660,11 @@ class ModelPredictor:
                 raise PredictionError(f"Encoder untuk '{d}' tidak tersedia.")
             
             if evaluation_mode == 'deep':
-                # Perbaikan: Menggunakan ensemble_helper untuk mode 'deep'
-                active_models = {'xgb': custom_models_4d.get(d)}
-                rf_model_path = os.path.join(self.model_dir_base, f"rf_model_{d}.pkl")
-                if os.path.exists(rf_model_path):
-                    active_models['rf'] = joblib.load(rf_model_path)
-                lgbm_model_path = os.path.join(self.model_dir_base, f"lgbm_model_{d}.pkl")
-                if os.path.exists(lgbm_model_path):
-                    active_models['lgbm'] = joblib.load(lgbm_model_path)
-                
+                active_models = {
+                    'xgb': custom_models_4d.get(d),
+                    'rf': custom_rf_models.get(d),
+                    'lgbm': custom_lgbm_models.get(d)
+                }
                 loaded_models = {name: model for name, model in active_models.items() if model is not None}
                 if not loaded_models:
                      raise PredictionError(f"Tidak ada model yang termuat untuk digit '{d}'.")
