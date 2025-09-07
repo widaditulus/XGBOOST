@@ -1,4 +1,4 @@
-# predictor.py (Final - Lengkap dengan Fitur Angka Berulang dan Pengetahuan Lainnya)
+# predictor.py (Final - Ditambahkan Fitur Angka Berpasangan & Pengetahuan Lainnya)
 # BEJO
 # -*- coding: utf-8 -*-
 import os
@@ -131,15 +131,22 @@ class FeatureProcessor:
         new_features = {}
         digit_cols = df[self.digits]
         
+        # --- PENAMBAHAN FITUR BARU: PENGETAHUAN ANGKA BERPASANGAN ---
         logger.info("Membuat fitur 'Pengetahuan Angka Berpasangan'...")
+        # Pasangan Depan (AS & KOP)
         new_features['as_kop_sum_prev'] = (df['as'] + df['kop']).shift(1)
         new_features['as_kop_diff_prev'] = (df['as'] - df['kop']).shift(1)
         new_features['as_kop_mul_prev'] = (df['as'] * df['kop']).shift(1)
+        
+        # Pasangan Belakang (KEPALA & EKOR)
         new_features['kepala_ekor_sum_prev'] = (df['kepala'] + df['ekor']).shift(1)
         new_features['kepala_ekor_diff_prev'] = (df['kepala'] - df['ekor']).shift(1)
         new_features['kepala_ekor_mul_prev'] = (df['kepala'] * df['ekor']).shift(1)
+        
+        # Pasangan Silang (AS & EKOR, KOP & KEPALA)
         new_features['as_ekor_sum_prev'] = (df['as'] + df['ekor']).shift(1)
         new_features['kop_kepala_sum_prev'] = (df['kop'] + df['kepala']).shift(1)
+        # -------------------------------------------------------------
         
         new_features['digit_sum_prev'] = digit_cols.sum(axis=1).shift(1)
         new_features['even_count_prev'] = (digit_cols % 2 == 0).sum(axis=1).shift(1)
@@ -187,17 +194,6 @@ class FeatureProcessor:
             long_ma = df[d].shift(1).rolling(window=30, min_periods=1).mean()
             new_features[f'{d}_delta_ma_7_30'] = short_ma - long_ma
 
-        # --- PENAMBAHAN FITUR BARU: PENGETAHUAN ANGKA BERULANG ---
-        logger.info("Membuat fitur 'Pengetahuan Angka Berulang'...")
-        # Fitur untuk mendeteksi apakah digit yang sama muncul lagi dari hari sebelumnya
-        for d in self.digits:
-            new_features[f'{d}_is_repeating_prev'] = (df[d] == df[d].shift(1)).astype(int).shift(1)
-        
-        # Fitur untuk mendeteksi angka kembar di posisi tertentu pada hasil kemarin
-        new_features['as_kop_is_twin_prev'] = (df['as'] == df['kop']).astype(int).shift(1)
-        new_features['kepala_ekor_is_twin_prev'] = (df['kepala'] == df['ekor']).astype(int).shift(1)
-        # -----------------------------------------------------------
-
         df_features = pd.DataFrame(new_features, index=df.index)
         training_df = pd.concat([df, df_features], axis=1)
         
@@ -213,6 +209,7 @@ class FeatureProcessor:
         if len(historical_df) < required_len:
             raise PredictionError(f"Data historis tidak cukup ({len(historical_df)}) untuk prediksi. Perlu {required_len}.")
 
+        last_known_row = historical_df.iloc[[-1]]
         pred_row = pd.DataFrame([{'date': target_date, 'result': '0000'}])
         df_for_calc = pd.concat([historical_df.iloc[-required_len:], pred_row], ignore_index=True)
         df_for_calc['date'] = pd.to_datetime(df_for_calc['date'])
