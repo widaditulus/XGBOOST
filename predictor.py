@@ -10,6 +10,7 @@ import pandas as pd
 import xgboost as xgb
 import threading
 from datetime import datetime, timedelta
+# PERBAIKAN: Impor yang hilang untuk mengatasi NameError
 from typing import Dict, List, Tuple, Optional, Any
 from collections import OrderedDict
 
@@ -453,7 +454,8 @@ class ModelPredictor:
             "am_accuracy": eval_summary_df.apply(lambda r: any(d in r['actual'] for d in r['angka_main'].replace(' ','').split(',')), axis=1).mean(),
             "cb_accuracy": eval_summary_df.apply(lambda r: r['colok_bebas'] in r['actual'], axis=1).mean(),
         }
-        summary["retraining_recommended"] = (summary["kepala_accuracy"] < ACCURACY_THRESHOLD_FOR_RETRAIN or summary["ekor_accuracy"] < CRITICAL_ACCURACY_THRESHOLD)
+        # PERBAIKAN: Konversi eksplisit ke bool standar Python untuk mencegah TypeError
+        summary["retraining_recommended"] = bool(summary["kepala_accuracy"] < ACCURACY_THRESHOLD_FOR_RETRAIN or summary["ekor_accuracy"] < CRITICAL_ACCURACY_THRESHOLD)
         summary["retraining_reason"] = f"Akurasi Kepala/Ekor ({summary['kepala_accuracy']:.1%}/{summary['ekor_accuracy']:.1%}) di bawah ambang batas." if summary["retraining_recommended"] else "N/A"
         return {"summary": summary, "results": results_list}
         
