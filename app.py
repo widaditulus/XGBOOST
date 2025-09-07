@@ -14,7 +14,8 @@ import signal
 import sys
 
 from predictor import ModelPredictor
-from utils import check_dependencies, logger
+# PERBAIKAN: Impor fungsi log_system_info yang baru
+from utils import check_dependencies, logger, log_system_info
 from constants import PASARAN_LIST, PASARAN_DISPLAY_MAPPING, LOGS_DIR, MODELS_DIR
 from exceptions import TrainingError, PredictionError, DataFetchingError
 from model_config import TRAINING_CONFIG_OPTIONS
@@ -376,7 +377,8 @@ def graceful_shutdown(signum, frame):
 if __name__ == '__main__':
     if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
         check_dependencies()
-        # PERBAIKAN: Daftarkan signal handler
+        # PERBAIKAN: Daftarkan signal handler DAN panggil pengecekan sistem
+        log_system_info() # PANGGIL FUNGSI INDIKATOR DI SINI
         signal.signal(signal.SIGINT, graceful_shutdown)
         signal.signal(signal.SIGTERM, graceful_shutdown)
     app.run(debug=True, use_reloader=False, host='0.0.0.0', port=5000)

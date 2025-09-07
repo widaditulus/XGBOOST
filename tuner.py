@@ -129,16 +129,18 @@ class HyperparameterTuner:
         study = optuna.create_study(direction='minimize', study_name=f"{self.pasaran}_{self.digit}_{self.mode}", storage=storage_name, load_if_exists=True)
         n_trials = TUNING_CONFIG['N_TRIALS_4D'] if self.mode == '4D' else TUNING_CONFIG['N_TRIALS_CB']
         
-        logger.info(f"TUNER: Memulai optimasi {self.mode} untuk {self.pasaran}-{self.digit}. Trials: {n_trials}")
-        study.optimize(self._objective, n_trials=n_trials, timeout=TUNING_CONFIG["TIMEOUT"], callbacks=[self.log_progress])
-        
-        self.best_params_ = study.best_params
-        logger.info(f"TUNER: Optimasi selesai. Best score (logloss): {study.best_value:.4f}")
-        self.save_best_params()
-        
         try:
+            logger.info(f"TUNER: Memulai optimasi {self.mode} untuk {self.pasaran}-{self.digit}. Trials: {n_trials}")
+            study.optimize(self._objective, n_trials=n_trials, timeout=TUNING_CONFIG["TIMEOUT"], callbacks=[self.log_progress])
+            
+            self.best_params_ = study.best_params
+            logger.info(f"TUNER: Optimasi selesai. Best score (logloss): {study.best_value:.4f}")
+            self.save_best_params()
+        
+        finally:
             # PERBAIKAN FINAL: Hancurkan objek studi dan panggil garbage collector
-            # untuk memaksa pelepasan handle file database.
+            # untuk memaksa pelepasan handle file database, lalu hapus file.
+            # Blok finally memastikan ini selalu dijalankan, bahkan jika 'optimize' gagal.
             del study
             gc.collect()
             
@@ -146,10 +148,11 @@ class HyperparameterTuner:
             time.sleep(1)
 
             if os.path.exists(db_file_name):
-                 os.remove(db_file_name)
-                 logger.info(f"TUNER: File DB sementara '{db_file_name}' berhasil dihapus.")
-        except OSError as e:
-            logger.warning(f"TUNER: Gagal menghapus file DB sementara '{db_file_name}': {e}")
+                try:
+                    os.remove(db_file_name)
+                    logger.info(f"TUNER: File DB sementara '{db_file_name}' berhasil dihapus.")
+                except OSError as e:
+                    logger.warning(f"TUNER: Gagal menghapus file DB sementara '{db_file_name}': {e}")
             
         return self.best_params_
 

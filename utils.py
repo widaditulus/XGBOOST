@@ -39,6 +39,23 @@ def error_handler(logger_instance):
         return wrapper
     return decorator
 
+def log_system_info():
+    """
+    PERBAIKAN: Fungsi baru untuk mendeteksi dan menampilkan status GPU.
+    Ini akan menjadi indikator utama Anda saat aplikasi dimulai.
+    """
+    logger.info("--- Pengecekan Perangkat Keras untuk Akselerasi ---")
+    try:
+        # Coba jalankan perintah nvidia-smi, cara paling andal untuk cek GPU NVIDIA
+        import subprocess
+        subprocess.check_output('nvidia-smi')
+        logger.info("✅ INDIKATOR: GPU NVIDIA terdeteksi. XGBoost akan mencoba menggunakan akselerasi GPU ('gpu_hist').")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        logger.warning("⚠️ INDIKATOR: GPU NVIDIA tidak terdeteksi atau nvidia-smi tidak ditemukan.")
+        logger.info("XGBoost akan menggunakan akselerasi CPU (menggunakan semua core).")
+    logger.info("----------------------------------------------------")
+
+
 def check_dependencies():
     logger.info("--- Pengecekan Versi Library ---")
     logger.info(f"NumPy version: {np.__version__}")

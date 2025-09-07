@@ -27,9 +27,12 @@ def create_pasaran_table(pasaran: str):
     with create_connection() as conn:
         cursor = conn.cursor()
         table_name = f"data_{pasaran}"
+        # PERBAIKAN: Menghapus constraint 'PRIMARY KEY' untuk membuat operasi 'replace'
+        # lebih kuat terhadap race condition. Keunikan data sudah dijamin oleh
+        # logika di DataManager._validate_data.
         sql = f"""
         CREATE TABLE IF NOT EXISTS {table_name} (
-            date TEXT PRIMARY KEY,
+            date TEXT,
             result TEXT NOT NULL
         )
         """
