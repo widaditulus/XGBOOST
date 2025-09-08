@@ -1,6 +1,6 @@
-# predictor.py (Final - Ditambahkan Fitur Angka Berpasangan & Pengetahuan Lainnya)
+# predictor.py (Final - Diperbaiki dan Diaudit Menyeluruh)
 # BEJO
-# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-\
 import os
 import shutil
 import joblib
@@ -23,7 +23,7 @@ from constants import (MODELS_DIR, MARKET_CONFIGS, DRIFT_THRESHOLD,
                      ENSEMBLE_CONFIG, TRAINING_PENALTY_CONFIG,
                      CB_STRATEGY_CONFIG, CRITICAL_ACCURACY_THRESHOLD)
 from utils import logger, error_handler, drift_logger
-from model_config import TRAINING_CONFIG_OPTIONS, XGB_PARAMS_CB
+from model_config import TRAINING_CONFIG_OPTIONS
 from exceptions import TrainingError, PredictionError, DataFetchingError
 from data_fetcher import DataFetcher
 from evaluation import calculate_brier_score, calculate_ece
@@ -110,6 +110,13 @@ class FeatureProcessor:
         long_ma = series.rolling(window=long_window, min_periods=1).mean()
         crossover = ((short_ma > long_ma) & (short_ma.shift(1) < long_ma.shift(1))) | ((short_ma < long_ma) & (short_ma.shift(1) > long_ma.shift(1)))
         return crossover.astype(int)
+    
+    # UPDATED: Fungsi untuk membuat pola ganjil/genap
+    def _get_even_odd_pattern(self, df: pd.DataFrame) -> pd.Series:
+        pattern = ''
+        for d in self.digits:
+            pattern += (df[d] % 2 == 0).astype(int).astype(str)
+        return pattern
 
     def fit_transform(self, df_input: pd.DataFrame) -> pd.DataFrame:
         df = df_input.copy()
@@ -136,6 +143,24 @@ class FeatureProcessor:
         new_features['odd_count_prev'] = (digit_cols % 2 != 0).sum(axis=1).shift(1)
         new_features['low_count_prev'] = (digit_cols < 5).sum(axis=1).shift(1)
         new_features['high_count_prev'] = (digit_cols >= 5).sum(axis=1).shift(1)
+        
+        # UPDATED: Menambahkan fitur pola ganjil/genap
+        shifted_even_odd_pattern = self._get_even_odd_pattern(df.shift(1))
+        new_features['even_odd_pattern'] = shifted_even_odd_pattern.astype('category').cat.codes
+        
+        # UPDATED: Menambahkan fitur angka berpasangan dan berulang yang lebih spesifik
+        shifted_digits = df[self.digits].shift(1)
+        shifted_result_str = df['result'].shift(1).astype(str)
+
+        # Cek apakah ada pasangan angka berulang yang berdekatan
+        # PERBAIKAN: Mengganti grup non-tangkapan (?:\\d) dengan grup tangkapan (\\d)
+        new_features['has_adj_pair'] = shifted_result_str.str.contains(r'(\d)\1', na=False, regex=True).astype(int)
+        
+        # Cek apakah ada angka berulang 3 kali
+        new_features['has_triple'] = shifted_digits.apply(lambda row: row.value_counts().gt(2).any(), axis=1).astype(int)
+        
+        # Cek apakah ada angka berulang 4 kali
+        new_features['has_quadruple'] = shifted_digits.apply(lambda row: row.value_counts().gt(3).any(), axis=1).astype(int)
 
         new_features['dayofweek'] = df['date'].dt.dayofweek
         new_features['is_weekend'] = df['date'].dt.dayofweek.isin([5, 6]).astype(int)
@@ -328,7 +353,7 @@ class ModelPredictor:
                 elif is_evaluation_run and training_mode == 'deep':
                     temp_rf_models[digit], temp_lgbm_models[digit] = train_temporary_ensemble_models(X_full, y_enc, digit)
         for i in range(10):
-            digit, cb_params = str(i), XGB_PARAMS_CB
+            digit, cb_params = str(i), TRAINING_CONFIG_OPTIONS.get(training_mode).get("cb_params")
             cb_trainer = ModelTrainer(self.digits, cb_params, self.pasaran)
             y_cb = training_df[f'cb_target_{digit}']
             if y_cb.nunique() < 2: continue
@@ -422,78 +447,6 @@ class ModelPredictor:
             "colok_bebas": colok_bebas
         }
     
-    @error_handler(logger)
-    def evaluate_performance(self, start_date: datetime, end_date: datetime, evaluation_mode: str = 'quick') -> Dict[str, Any]:
-        RETRAIN_INTERVAL_DAYS = 7 
-        full_df = self.data_manager.get_data()
-        eval_range = full_df[(full_df['date'] >= start_date) & (full_df['date'] <= end_date)].copy()
-        if eval_range.empty: return {"summary": {"error": "Tidak ada data pada periode yang diminta"}, "results": []}
-        results_list, temp_models, last_retrain_date = [], None, None
-        for index, row in eval_range.iterrows():
-            eval_date, actual_result = row['date'], row['result']
-            historical_df = full_df[full_df['date'] < eval_date].copy()
-            if historical_df.empty: continue
-            try:
-                if temp_models is None or (eval_date - last_retrain_date).days >= RETRAIN_INTERVAL_DAYS:
-                    temp_models = self.train_model(training_mode=evaluation_mode, custom_data=historical_df)
-                    last_retrain_date = eval_date
-                pred_result = self._predict_with_custom_models(historical_df, eval_date, evaluation_mode, *temp_models)
-                if pred_result: results_list.append({ "date": eval_date.strftime('%Y-%m-%d'), "actual": actual_result, **pred_result })
-            except (PredictionError, TrainingError) as e:
-                logger.error(f"Error saat backtest untuk {eval_date}: {e}", exc_info=True)
-                continue
-        if not results_list: return {"summary": {"error": "Gagal menghasilkan prediksi."}, "results": []}
-        eval_summary_df = pd.DataFrame(results_list)
-        def check_hit(p, a): return a in p.replace(' ','').split(',') if isinstance(p, str) else False
-        summary = {
-            "total_days_evaluated": len(eval_summary_df),
-            "as_accuracy": eval_summary_df.apply(lambda r: check_hit(r['kandidat_as'], r['actual'][0]), axis=1).mean(),
-            "kop_accuracy": eval_summary_df.apply(lambda r: check_hit(r['kandidat_kop'], r['actual'][1]), axis=1).mean(),
-            "kepala_accuracy": eval_summary_df.apply(lambda r: check_hit(r['kandidat_kepala'], r['actual'][2]), axis=1).mean(),
-            "ekor_accuracy": eval_summary_df.apply(lambda r: check_hit(r['kandidat_ekor'], r['actual'][3]), axis=1).mean(),
-            "am_accuracy": eval_summary_df.apply(lambda r: any(d in r['actual'] for d in r['angka_main'].replace(' ','').split(',')), axis=1).mean(),
-            "cb_accuracy": eval_summary_df.apply(lambda r: r['colok_bebas'] in r['actual'], axis=1).mean(),
-        }
-        # PERBAIKAN: Konversi eksplisit ke bool standar Python untuk mencegah TypeError
-        summary["retraining_recommended"] = bool(summary["kepala_accuracy"] < ACCURACY_THRESHOLD_FOR_RETRAIN or summary["ekor_accuracy"] < CRITICAL_ACCURACY_THRESHOLD)
-        summary["retraining_reason"] = f"Akurasi Kepala/Ekor ({summary['kepala_accuracy']:.1%}/{summary['ekor_accuracy']:.1%}) di bawah ambang batas." if summary["retraining_recommended"] else "N/A"
-        return {"summary": summary, "results": results_list}
-        
-    def _predict_with_custom_models(self, historical_df, target_date, evaluation_mode, custom_models_4d, custom_cb_models, custom_encoders, feature_names, custom_rf_models, custom_lgbm_models) -> Dict[str, Any]:
-        eval_feature_processor = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
-        latest_features = eval_feature_processor.transform_for_prediction(historical_df, target_date)
-        latest_features = latest_features.reindex(columns=feature_names, fill_value=0)
-        predictions, all_4d_probas = {}, {}
-        for d in self.digits:
-            encoder = custom_encoders.get(d)
-            if not encoder: raise PredictionError(f"Encoder untuk '{d}' tidak tersedia.")
-            if evaluation_mode == 'deep':
-                active_models = {'xgb': custom_models_4d.get(d), 'rf': custom_rf_models.get(d), 'lgbm': custom_lgbm_models.get(d)}
-                loaded_models = {name: model for name, model in active_models.items() if model is not None}
-                if not loaded_models: raise PredictionError(f"Tidak ada model yang termuat untuk digit '{d}'.")
-                probabilities = ensemble_predict_proba(loaded_models, latest_features)[0]
-            else:
-                model = custom_models_4d.get(d)
-                if not model: raise PredictionError(f"Model XGBoost tidak ditemukan untuk digit '{d}'.")
-                probabilities = model.predict_proba(latest_features)[0]
-            all_4d_probas[d] = probabilities
-            top_indices = np.argsort(probabilities)[::-1]
-            top_three_digits = encoder.inverse_transform(top_indices[:3])
-            predictions[d] = [str(digit) for digit in top_three_digits]
-        strategy = CB_STRATEGY_CONFIG.get(self.pasaran, "dedicated")
-        colok_bebas = self._determine_colok_bebas_aggregated(all_4d_probas, custom_encoders) if strategy == "aggregated" else self._determine_colok_bebas_dedicated(latest_features, custom_cb_models)
-        angka_main = self._determine_angka_main(predictions)
-        return {
-            "prediction_date": target_date.strftime("%Y-%m-%d"),
-            "final_4d_prediction": f"{predictions['as'][0]}{predictions['kop'][0]}{predictions['kepala'][0]}{predictions['ekor'][0]}",
-            "kandidat_as": ", ".join(predictions['as']),
-            "kandidat_kop": ", ".join(predictions['kop']),
-            "kandidat_kepala": ", ".join(predictions['kepala']),
-            "kandidat_ekor": ", ".join(predictions['ekor']),
-            "angka_main": ", ".join(angka_main),
-            "colok_bebas": colok_bebas
-        }
-        
     @error_handler(drift_logger)
     def _check_for_drift(self, digit: str) -> bool:
         new_importance_path = os.path.join(self.model_dir_base, f"feature_importance_{digit}.csv")

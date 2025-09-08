@@ -52,11 +52,20 @@ XGB_PARAMS_DEEP_ANALYSIS = {
                "reg_alpha": 0.2, "random_state": 42, "early_stopping_rounds": 60}
 }
 
+# UPDATED: Konfigurasi khusus untuk GPU
+# Menggunakan `tree_method: "hist"` dan `device: "cuda"` sesuai rekomendasi XGBoost 3.0.5
+XGB_PARAMS_GPU = {
+    "as":     {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 1000, "learning_rate": 0.05, "max_depth": 6, "subsample": 0.8, "colsample_bytree": 0.8, "random_state": 42, "early_stopping_rounds": 30, "tree_method": "hist", "device": "cuda"},
+    "kop":    {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 1000, "learning_rate": 0.05, "max_depth": 6, "subsample": 0.8, "colsample_bytree": 0.8, "random_state": 42, "early_stopping_rounds": 30, "tree_method": "hist", "device": "cuda"},
+    "kepala": {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 1000, "learning_rate": 0.05, "max_depth": 6, "subsample": 0.8, "colsample_bytree": 0.8, "random_state": 42, "early_stopping_rounds": 30, "tree_method": "hist", "device": "cuda"},
+    "ekor":   {"objective": "multi:softprob", "eval_metric": "mlogloss", "n_estimators": 1000, "learning_rate": 0.05, "max_depth": 6, "subsample": 0.8, "colsample_bytree": 0.8, "random_state": 42, "early_stopping_rounds": 30, "tree_method": "hist", "device": "cuda"}
+}
 
 # --- PENGGABUNGAN KONFIGURASI ---
 TRAINING_CONFIG_OPTIONS = {
     'QUICK': {"xgb_params": XGB_PARAMS_CEPAT, "cb_params": XGB_PARAMS_CB},
     'COMPREHENSIVE': {"xgb_params": XGB_PARAMS_AKURAT, "cb_params": XGB_PARAMS_CB},
     'OPTIMIZED': {"xgb_params": XGB_PARAMS_OPTIMIZED, "cb_params": XGB_PARAMS_CB},
-    'DEEP_ANALYSIS': {"xgb_params": XGB_PARAMS_DEEP_ANALYSIS, "cb_params": XGB_PARAMS_CB}
+    'DEEP_ANALYSIS': {"xgb_params": XGB_PARAMS_DEEP_ANALYSIS, "cb_params": XGB_PARAMS_CB},
+    'GPU': {"xgb_params": XGB_PARAMS_GPU, "cb_params": XGB_PARAMS_CB}
 }

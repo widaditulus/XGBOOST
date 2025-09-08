@@ -1,4 +1,4 @@
-# app.py (Final - Mendukung Mode Prediksi Fleksibel)
+# app.py (VERSI FINAL TERPADU)
 # BEJO
 # -*- coding: utf-8 -*-
 import os
@@ -9,9 +9,12 @@ from datetime import datetime
 import threading
 from functools import wraps, lru_cache
 import pandas as pd
-# PERBAIKAN: Impor modul yang diperlukan untuk graceful shutdown
 import signal
 import sys
+# UPDATED: Impor Waitress untuk deployment produksi
+from waitress import serve
+# UPDATED: Impor dotenv
+import dotenv
 
 from predictor import ModelPredictor
 from utils import check_dependencies, logger
@@ -251,11 +254,15 @@ def run_evaluation_in_background_threaded(pasaran: str, start_date: datetime, en
         with evaluation_lock:
             evaluation_status[pasaran] = 'completed'
             evaluation_status[f"{pasaran}_data"] = result
+            # PERBAIKAN: Tambahkan pesan status di sini
+            evaluation_status[f"{pasaran}_message"] = "Evaluasi selesai."
     except Exception as e:
         logger.error(f"Exception di thread evaluasi untuk {pasaran}: {e}", exc_info=True)
         with evaluation_lock:
             evaluation_status[pasaran] = 'failed'
             evaluation_status[f"{pasaran}_data"] = {"summary": {"error": f"Terjadi kesalahan: {str(e)}"}, "results": []}
+            # PERBAIKAN: Tambahkan pesan error di sini
+            evaluation_status[f"{pasaran}_message"] = f"Evaluasi gagal: {str(e)}"
 
 @app.route('/evaluation-status', methods=['GET'])
 @validate_pasaran
@@ -263,7 +270,9 @@ def get_evaluation_status(pasaran):
     with evaluation_lock:
         status = evaluation_status.get(pasaran, 'idle')
         data = evaluation_status.get(f"{pasaran}_data", {})
-    return jsonify({"status": status, "data": data})
+        # PERBAIKAN: Ambil pesan dari kamus status
+        message = evaluation_status.get(f"{pasaran}_message", "Status evaluasi.")
+    return jsonify({"status": status, "data": data, "message": message})
 
 @app.route('/update-data', methods=['POST'])
 @validate_pasaran
@@ -374,9 +383,13 @@ def graceful_shutdown(signum, frame):
     sys.exit(0)
 
 if __name__ == '__main__':
-    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
-        check_dependencies()
-        # PERBAIKAN: Daftarkan signal handler
-        signal.signal(signal.SIGINT, graceful_shutdown)
-        signal.signal(signal.SIGTERM, graceful_shutdown)
-    app.run(debug=True, use_reloader=False, host='0.0.0.0', port=5000)
+    # UPDATED: Hapus semua logika dan panggil langsung server Waitress
+    check_dependencies()
+    # Pastikan signal handler tetap didaftarkan
+    signal.signal(signal.SIGINT, graceful_shutdown)
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+    
+    logger.info("Starting production server with Waitress...")
+    # Jalankan server Waitress secara langsung
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=5000)
