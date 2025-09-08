@@ -17,6 +17,7 @@ from collections import OrderedDict
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 import lightgbm as lgb
+import re
 
 from constants import (MODELS_DIR, MARKET_CONFIGS, DRIFT_THRESHOLD,
                      ACCURACY_THRESHOLD_FOR_RETRAIN, ADAPTIVE_LEARNING_CONFIG,
@@ -110,8 +111,7 @@ class FeatureProcessor:
         long_ma = series.rolling(window=long_window, min_periods=1).mean()
         crossover = ((short_ma > long_ma) & (short_ma.shift(1) < long_ma.shift(1))) | ((short_ma < long_ma) & (short_ma.shift(1) > long_ma.shift(1)))
         return crossover.astype(int)
-    
-    # UPDATED: Fungsi untuk membuat pola ganjil/genap
+
     def _get_even_odd_pattern(self, df: pd.DataFrame) -> pd.Series:
         pattern = ''
         for d in self.digits:
@@ -125,10 +125,10 @@ class FeatureProcessor:
             df[digit] = df["result"].str[i].astype('int8')
         for i in range(10):
             df[f'cb_target_{i}'] = df['result'].str.contains(str(i)).astype(int)
-        
+
         new_features = {}
         digit_cols = df[self.digits]
-        
+
         new_features['as_kop_sum_prev'] = (df['as'] + df['kop']).shift(1)
         new_features['as_kop_diff_prev'] = (df['as'] - df['kop']).shift(1)
         new_features['as_kop_mul_prev'] = (df['as'] * df['kop']).shift(1)
@@ -137,36 +137,30 @@ class FeatureProcessor:
         new_features['kepala_ekor_mul_prev'] = (df['kepala'] * df['ekor']).shift(1)
         new_features['as_ekor_sum_prev'] = (df['as'] + df['ekor']).shift(1)
         new_features['kop_kepala_sum_prev'] = (df['kop'] + df['kepala']).shift(1)
-        
+
         new_features['digit_sum_prev'] = digit_cols.sum(axis=1).shift(1)
         new_features['even_count_prev'] = (digit_cols % 2 == 0).sum(axis=1).shift(1)
         new_features['odd_count_prev'] = (digit_cols % 2 != 0).sum(axis=1).shift(1)
         new_features['low_count_prev'] = (digit_cols < 5).sum(axis=1).shift(1)
         new_features['high_count_prev'] = (digit_cols >= 5).sum(axis=1).shift(1)
-        
-        # UPDATED: Menambahkan fitur pola ganjil/genap
+
         shifted_even_odd_pattern = self._get_even_odd_pattern(df.shift(1))
         new_features['even_odd_pattern'] = shifted_even_odd_pattern.astype('category').cat.codes
-        
-        # UPDATED: Menambahkan fitur angka berpasangan dan berulang yang lebih spesifik
+
         shifted_digits = df[self.digits].shift(1)
         shifted_result_str = df['result'].shift(1).astype(str)
 
-        # Cek apakah ada pasangan angka berulang yang berdekatan
-        # PERBAIKAN: Mengganti grup non-tangkapan (?:\\d) dengan grup tangkapan (\\d)
-        new_features['has_adj_pair'] = shifted_result_str.str.contains(r'(\d)\1', na=False, regex=True).astype(int)
-        
-        # Cek apakah ada angka berulang 3 kali
+        # PERBAIKAN: Menggunakan `str.findall` untuk menghindari `UserWarning`
+        new_features['has_adj_pair'] = shifted_result_str.apply(lambda s: 1 if s and re.findall(r'(\d)\1', s) else 0)
+
         new_features['has_triple'] = shifted_digits.apply(lambda row: row.value_counts().gt(2).any(), axis=1).astype(int)
-        
-        # Cek apakah ada angka berulang 4 kali
         new_features['has_quadruple'] = shifted_digits.apply(lambda row: row.value_counts().gt(3).any(), axis=1).astype(int)
 
         new_features['dayofweek'] = df['date'].dt.dayofweek
         new_features['is_weekend'] = df['date'].dt.dayofweek.isin([5, 6]).astype(int)
         new_features['day_sin'] = np.sin(2 * np.pi * df['date'].dt.dayofweek / 6.0)
         new_features['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek / 6.0)
-        
+
         vol_window = self.feature_config.get("volatility_window", 10)
         adv_window = 30
         for d in self.digits:
@@ -181,12 +175,12 @@ class FeatureProcessor:
         for d in self.digits:
             for i in range(1, self.timesteps + 1):
                 new_features[f'{d}_lag_{i}'] = df[d].shift(i)
-        
+
         for d in self.digits:
             for num in range(10):
                 is_num = (df[d] == num)
                 new_features[f'{d}_{num}_freq_30d'] = is_num.shift(1).rolling(window=30, min_periods=1).sum()
-                
+
                 not_is_num = (df[d] != num)
                 days_since_seen_series = not_is_num.groupby(not_is_num.cumsum()).cumcount()
                 new_features[f'{d}_{num}_days_since_seen'] = days_since_seen_series.shift(1)
@@ -203,12 +197,12 @@ class FeatureProcessor:
 
         df_features = pd.DataFrame(new_features, index=df.index)
         training_df = pd.concat([df, df_features], axis=1)
-        
+
         self.feature_names = [col for col in training_df.columns if col not in ['date', 'result'] + self.digits + self.cb_target_cols]
-        
+
         training_df.dropna(subset=self.feature_names + self.digits, inplace=True)
         training_df[self.feature_names] = training_df[self.feature_names].fillna(0)
-        
+
         return training_df
 
     def transform_for_prediction(self, historical_df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
@@ -219,9 +213,9 @@ class FeatureProcessor:
         pred_row = pd.DataFrame([{'date': target_date, 'result': '0000'}])
         df_for_calc = pd.concat([historical_df.iloc[-required_len:], pred_row], ignore_index=True)
         df_for_calc['date'] = pd.to_datetime(df_for_calc['date'])
-        
+
         df_with_features = self.fit_transform(df_for_calc)
-        
+
         return df_with_features.iloc[[-1]][self.feature_names]
 
 class ModelTrainer:
@@ -233,12 +227,18 @@ class ModelTrainer:
     @error_handler(logger)
     def train_digit_model(self, X_full, y_full, digit, existing_model=None, feature_subset=None, sample_weights=None):
         try:
+            # UPDATED: Tambahkan validasi data sebelum training
+            if not all(np.isfinite(X_full.values.flatten())):
+                raise ValueError("Input data contains NaN or infinite values.")
+
             xgb_params = self.training_params
             le = LabelEncoder()
             y_encoded = le.fit_transform(y_full)
-            if len(le.classes_) < 2: return None, None, None, None
+            if len(le.classes_) < 2: 
+                logger.warning(f"TRAINING GAGAL: Kurang dari 2 kelas unik untuk digit {digit}. Training dilewati.")
+                return None, None, None, None
             X_train = X_full[feature_subset] if feature_subset else X_full
-            
+
             if TRAINING_PENALTY_CONFIG["ENABLED"]:
                 class_counts = y_full.value_counts()
                 total_samples = len(y_full)
@@ -254,10 +254,14 @@ class ModelTrainer:
         except Exception as e:
             logger.error(f"Error training model untuk digit {digit}: {e}", exc_info=True)
             return None, None, None, None
-    
+
     @error_handler(logger)
     def train_cb_digit_model(self, X_full, y_full, digit, sample_weights=None):
         try:
+            # UPDATED: Tambahkan validasi data sebelum training
+            if not all(np.isfinite(X_full.values.flatten())):
+                raise ValueError("Input data contains NaN or infinite values.")
+
             model = xgb.XGBClassifier(**self.training_params) 
             if 'scale_pos_weight' not in self.training_params:
                 scale_pos_weight = (y_full == 0).sum() / max(1, (y_full == 1).sum())
@@ -335,14 +339,16 @@ class ModelPredictor:
             days_since_latest = (training_df['date'].max() - training_df['date']).dt.days
             decay_rate = np.log(2) / ADAPTIVE_LEARNING_CONFIG["RECENCY_HALF_LIFE_DAYS"]
             sample_weights = pd.Series(np.exp(-decay_rate * days_since_latest), index=training_df.index)
-        X_full = training_df[current_feature_names]
+        X_full = training_df[current_feature_names].replace([np.inf, -np.inf], 0).fillna(0) # UPDATED: Pastikan tidak ada inf atau NaN
         temp_models_4d, temp_cb_models, temp_encoders, temp_rf_models, temp_lgbm_models = {}, {}, {}, {}, {}
         for digit in self.digits:
             config_options = TRAINING_CONFIG_OPTIONS.get(training_mode, TRAINING_CONFIG_OPTIONS['OPTIMIZED'])
             training_params = config_options.get("xgb_params", {}).get(digit, {})
             model_trainer = ModelTrainer(self.digits, training_params, self.pasaran)
             y_full = training_df[digit]
-            if y_full.nunique() < 2: continue
+            if y_full.nunique() < 2: 
+                logger.warning(f"Training untuk {digit} dilewati: Kurang dari 2 kelas unik.")
+                continue
             model, le, imp, y_enc = model_trainer.train_digit_model(X_full, y_full, digit, sample_weights=sample_weights)
             if model and le:
                 temp_models_4d[digit], temp_encoders[digit] = model, le
@@ -356,7 +362,9 @@ class ModelPredictor:
             digit, cb_params = str(i), TRAINING_CONFIG_OPTIONS.get(training_mode).get("cb_params")
             cb_trainer = ModelTrainer(self.digits, cb_params, self.pasaran)
             y_cb = training_df[f'cb_target_{digit}']
-            if y_cb.nunique() < 2: continue
+            if y_cb.nunique() < 2: 
+                logger.warning(f"Training untuk CB-{digit} dilewati: Kurang dari 2 kelas unik.")
+                continue
             cb_model = cb_trainer.train_cb_digit_model(X_full, y_cb, digit, sample_weights=sample_weights)
             if cb_model:
                 temp_cb_models[digit] = cb_model
@@ -374,7 +382,7 @@ class ModelPredictor:
                 proba = model.predict_proba(validated_features)[0][1]
                 cb_probas[str(i)] = proba
         return max(cb_probas, key=cb_probas.get) if cb_probas else ""
-    
+
     def _determine_colok_bebas_aggregated(self, all_4d_probas: Dict[str, np.ndarray], encoders: Dict) -> str:
         total_probs = {str(i): 0.0 for i in range(10)}
         for digit_pos, probabilities in all_4d_probas.items():
@@ -446,7 +454,7 @@ class ModelPredictor:
             "angka_main": ", ".join(angka_main),
             "colok_bebas": colok_bebas
         }
-    
+
     @error_handler(drift_logger)
     def _check_for_drift(self, digit: str) -> bool:
         new_importance_path = os.path.join(self.model_dir_base, f"feature_importance_{digit}.csv")

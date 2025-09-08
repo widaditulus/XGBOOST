@@ -1,4 +1,4 @@
-# app.py (VERSI FINAL TERPADU)
+# app.py (VERSI FINAL TERPADU DAN DIAUDIT)
 # BEJO
 # -*- coding: utf-8 -*-
 import os
@@ -372,24 +372,3 @@ def debug_model_status(pasaran):
         "data_manager_df_shape": predictor.data_manager.df.shape if predictor.data_manager.df is not None else "Data belum dimuat",
     }
     return jsonify(status)
-
-# PERBAIKAN: Fungsi signal handler untuk graceful shutdown
-def graceful_shutdown(signum, frame):
-    logger.info("Shutdown signal received. Waiting for active threads to complete...")
-    # Beri waktu beberapa detik bagi thread untuk selesai
-    for thread in active_threads:
-        thread.join(timeout=10.0)
-    logger.info("All active threads have been handled. Exiting.")
-    sys.exit(0)
-
-if __name__ == '__main__':
-    # UPDATED: Hapus semua logika dan panggil langsung server Waitress
-    check_dependencies()
-    # Pastikan signal handler tetap didaftarkan
-    signal.signal(signal.SIGINT, graceful_shutdown)
-    signal.signal(signal.SIGTERM, graceful_shutdown)
-    
-    logger.info("Starting production server with Waitress...")
-    # Jalankan server Waitress secara langsung
-    from waitress import serve
-    serve(app, host='0.0.0.0', port=5000)

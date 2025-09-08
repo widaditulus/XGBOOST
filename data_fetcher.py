@@ -44,7 +44,7 @@ class DataFetcher:
                 if latest_date_in_db.date() < (datetime.now() - timedelta(days=1)).date():
                     logger.warning(f"Data di database lokal ketinggalan (terakhir {latest_date_in_db.date()}). Memaksa ambil dari GitHub.")
                     return self.fetch_data(force_github=True)
-                
+
                 return df_from_db
 
         logger.info(f"Mengambil data dari GitHub untuk {self.pasaran}.")
@@ -54,9 +54,9 @@ class DataFetcher:
         try:
             response = requests.get(self.github_url, timeout=15)
             response.raise_for_status()
-            
+
             df = pd.read_csv(StringIO(response.text), dtype={'result': str, 'nomor': str})
-            
+
             if df.empty: raise DataFetchingError(f"Data kosong dari URL untuk {self.pasaran}")
 
             df.columns = df.columns.str.lower().str.strip()
@@ -70,9 +70,9 @@ class DataFetcher:
             df['date'] = df['date'].apply(self._parse_date)
             df.dropna(subset=['date', 'result'], inplace=True)
             df = df[['date', 'result']].sort_values('date').reset_index(drop=True)
-            
+
             save_data_to_db(self.pasaran, df)
-            
+
             return df
 
         except requests.exceptions.RequestException as e:

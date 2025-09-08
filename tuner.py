@@ -38,7 +38,7 @@ class HyperparameterTuner:
         # Mengambil data mentah. Ini akan digunakan untuk split di _objective
         self.df_raw = data_manager.get_data(force_refresh=True, force_github=True)
         self.config = MARKET_CONFIGS[self.pasaran]
-        
+
     def _objective(self, trial: optuna.Trial) -> float:
         if self.mode == '4D':
             params = {
@@ -66,29 +66,22 @@ class HyperparameterTuner:
         })
         cv = TimeSeriesSplit(n_splits=TUNING_CONFIG["N_SPLITS"])
         logloss_scores = []
-        
-        # PERBAIKAN: Logika rekayasa fitur dipindahkan ke dalam loop TimeSeriesSplit
-        # untuk mencegah data leakage sekecil apa pun. Fitur (misal: rolling mean)
-        # untuk setiap fold kini hanya dihitung berdasarkan data yang tersedia hingga saat itu.
-        for train_idx, val_idx in cv.split(self.df_raw):
-            # 1. Ambil data mentah HANYA untuk fold saat ini (train + validasi)
-            # Ini memastikan tidak ada data dari masa depan (fold berikutnya) yang ikut terproses.
-            current_fold_raw_df = self.df_raw.iloc[:val_idx[-1] + 1].copy()
 
-            # 2. Lakukan rekayasa fitur pada data fold saat ini.
-            # Instance FeatureProcessor dibuat baru setiap iterasi (stateless).
+        # PERBAIKAN: Logika rekayasa fitur dipindahkan ke dalam loop TimeSeriesSplit
+        for train_idx, val_idx in cv.split(self.df_raw):
+            current_fold_raw_df = self.df_raw.iloc[:val_idx[-1] + 1].copy()
             fp = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
             processed_fold_df = fp.fit_transform(current_fold_raw_df)
-            
-            # 3. Dapatkan kembali index yang sesuai dari dataframe yang sudah diproses.
-            # Hal ini diperlukan karena `fit_transform` dapat menghapus baris awal (misal: karena data tidak cukup untuk rolling window).
+
+            # UPDATED: Tangkap feature_names setelah pemrosesan
+            feature_names = fp.feature_names
+
             train_rows = processed_fold_df.index.intersection(train_idx)
             val_rows = processed_fold_df.index.intersection(val_idx)
 
             if len(train_rows) == 0 or len(val_rows) == 0:
                 continue
 
-            feature_names = fp.feature_names
             if self.mode == '4D':
                 target_col = self.digit
                 le = LabelEncoder().fit(processed_fold_df[target_col])
@@ -101,7 +94,7 @@ class HyperparameterTuner:
             y_train = processed_fold_df.loc[train_rows, target_col]
             X_val = processed_fold_df.loc[val_rows, feature_names]
             y_val = processed_fold_df.loc[val_rows, target_col]
-            
+
             if self.mode == '4D':
                 y_train_encoded = le.transform(y_train)
                 y_val_encoded = le.transform(y_val)
@@ -111,11 +104,11 @@ class HyperparameterTuner:
 
             model = xgb.XGBClassifier(**params)
             model.fit(X_train, y_train_encoded, eval_set=[(X_val, y_val_encoded)], verbose=False)
-            
+
             preds = model.predict_proba(X_val)
             loss = log_loss(y_val_encoded, preds, labels=range(len(all_labels)))
             logloss_scores.append(loss)
-            
+
         if not logloss_scores:
             logger.warning(f"TUNER: Tidak ada data validasi yang cukup untuk {self.mode}-{self.digit}. Kembali ke infinity.")
             return float('inf')
@@ -125,23 +118,23 @@ class HyperparameterTuner:
     def run_tuning(self) -> dict:
         db_file_name = f"{self.pasaran}_{self.digit}_{self.mode}_tuning.db"
         storage_name = f"sqlite:///{db_file_name}"
-        
+
         study = optuna.create_study(direction='minimize', study_name=f"{self.pasaran}_{self.digit}_{self.mode}", storage=storage_name, load_if_exists=True)
         n_trials = TUNING_CONFIG['N_TRIALS_4D'] if self.mode == '4D' else TUNING_CONFIG['N_TRIALS_CB']
-        
+
         logger.info(f"TUNER: Memulai optimasi {self.mode} untuk {self.pasaran}-{self.digit}. Trials: {n_trials}")
         study.optimize(self._objective, n_trials=n_trials, timeout=TUNING_CONFIG["TIMEOUT"], callbacks=[self.log_progress])
-        
+
         self.best_params_ = study.best_params
         logger.info(f"TUNER: Optimasi selesai. Best score (logloss): {study.best_value:.4f}")
         self.save_best_params()
-        
+
         try:
             # PERBAIKAN FINAL: Hancurkan objek studi dan panggil garbage collector
             # untuk memaksa pelepasan handle file database.
             del study
             gc.collect()
-            
+
             # Beri jeda 1 detik untuk memastikan OS Windows sempat melepaskan file lock.
             time.sleep(1)
 
@@ -150,7 +143,7 @@ class HyperparameterTuner:
                  logger.info(f"TUNER: File DB sementara '{db_file_name}' berhasil dihapus.")
         except OSError as e:
             logger.warning(f"TUNER: Gagal menghapus file DB sementara '{db_file_name}': {e}")
-            
+
         return self.best_params_
 
     def save_best_params(self):
@@ -170,7 +163,7 @@ class HyperparameterTuner:
         with open(file_path, 'w') as f:
             json.dump(final_params, f, indent=4)
         logger.info(f"TUNER: Parameter terbaik untuk {self.mode}-{self.digit} disimpan di {file_path}")
-        
+
     def log_progress(self, study, trial):
         n_trials = TUNING_CONFIG['N_TRIALS_4D'] if self.mode == '4D' else TUNING_CONFIG['N_TRIALS_CB']
         best_value = study.best_value if study.best_trial else float('inf')

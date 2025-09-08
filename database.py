@@ -1,4 +1,5 @@
-# database.py
+# database.py (Final - Diperbaiki)
+# BEJO
 # -*- coding: utf-8 -*-
 import sqlite3
 import pandas as pd
@@ -22,24 +23,8 @@ def create_connection():
         raise DataFetchingError("Gagal terhubung ke database lokal.")
 
 @error_handler(logger)
-def create_pasaran_table(pasaran: str):
-    """Membuat tabel untuk pasaran tertentu jika belum ada."""
-    with create_connection() as conn:
-        cursor = conn.cursor()
-        table_name = f"data_{pasaran}"
-        sql = f"""
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            date TEXT PRIMARY KEY,
-            result TEXT NOT NULL
-        )
-        """
-        cursor.execute(sql)
-        conn.commit()
-
-@error_handler(logger)
 def get_latest_data(pasaran: str, limit: Optional[int] = None) -> Optional[pd.DataFrame]:
     """Mengambil data historis terbaru dari database untuk pasaran tertentu."""
-    create_pasaran_table(pasaran)
     with create_connection() as conn:
         table_name = f"data_{pasaran}"
         try:
@@ -57,7 +42,6 @@ def get_latest_data(pasaran: str, limit: Optional[int] = None) -> Optional[pd.Da
 @error_handler(logger)
 def save_data_to_db(pasaran: str, df: pd.DataFrame):
     """Menyimpan atau memperbarui data dari DataFrame ke database."""
-    create_pasaran_table(pasaran)
     if df.empty:
         logger.warning(f"Tidak ada data untuk disimpan ke DB untuk pasaran: {pasaran}")
         return
@@ -66,5 +50,6 @@ def save_data_to_db(pasaran: str, df: pd.DataFrame):
         table_name = f"data_{pasaran}"
         df_to_save = df.copy()
         df_to_save['date'] = df_to_save['date'].dt.strftime('%Y-%m-%d')
-        df_to_save.to_sql(table_name, conn, if_exists='replace', index=False)
+        # UPDATED: Gunakan 'append' untuk menambahkan data dan mencegah 'OperationalError'.
+        df_to_save.to_sql(table_name, conn, if_exists='append', index=False)
     logger.info(f"Data untuk pasaran {pasaran} berhasil disimpan ke database.")
