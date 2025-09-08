@@ -1,4 +1,4 @@
-# app.py (Final - Mendukung Mode Prediksi Fleksibel & Server Produksi)
+# app.py (Final - Mendukung Mode Prediksi Fleksibel)
 # BEJO
 # -*- coding: utf-8 -*-
 import os
@@ -9,12 +9,12 @@ from datetime import datetime
 import threading
 from functools import wraps, lru_cache
 import pandas as pd
+# PERBAIKAN: Impor modul yang diperlukan untuk graceful shutdown
 import signal
 import sys
-from waitress import serve
 
 from predictor import ModelPredictor
-from utils import check_dependencies, logger, log_system_info
+from utils import check_dependencies, logger
 from constants import PASARAN_LIST, PASARAN_DISPLAY_MAPPING, LOGS_DIR, MODELS_DIR
 from exceptions import TrainingError, PredictionError, DataFetchingError
 from model_config import TRAINING_CONFIG_OPTIONS
@@ -22,7 +22,9 @@ from tuner import HyperparameterTuner
 
 app = Flask(__name__, template_folder='.', static_folder='.', static_url_path='')
 
+# PERBAIKAN: List untuk melacak semua thread yang aktif
 active_threads = []
+
 training_status = {}
 training_lock = threading.Lock()
 evaluation_status = {}
@@ -31,8 +33,9 @@ update_status = {}
 update_lock = threading.Lock()
 tuning_status = {}
 tuning_lock = threading.Lock()
-cb_tuning_status = {}
+cb_tuning_status = {} # Status terpisah untuk tuning CB
 cb_tuning_lock = threading.Lock()
+
 
 @app.errorhandler(Exception)
 def handle_unexpected_error(e):
@@ -54,6 +57,11 @@ def validate_pasaran(f):
 
 @lru_cache(maxsize=10)
 def get_predictor(pasaran: str) -> ModelPredictor:
+    """
+    Mengambil atau membuat instance ModelPredictor untuk pasaran tertentu.
+    Cache di-manage oleh LRU untuk mencegah kebocoran memori.
+    lru_cache sudah thread-safe, jadi lock manual tidak diperlukan lagi.
+    """
     logger.info(f"LRU CACHE: Mengakses predictor untuk: {pasaran.upper()}")
     return ModelPredictor(pasaran)
 
@@ -72,10 +80,13 @@ def data_status(pasaran):
         logger.error(f"Gagal memeriksa status data untuk {pasaran}: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# PERBAIKAN: Wrapper untuk mengelola lifecycle thread
 def manage_thread(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
+        # Hapus thread yang sudah tidak aktif dari list
         active_threads[:] = [t for t in active_threads if t.is_alive()]
+        
         thread = threading.Thread(target=func, args=args, kwargs=kwargs)
         thread.daemon = True
         active_threads.append(thread)
@@ -87,18 +98,23 @@ def manage_thread(func):
 def start_training(pasaran):
     training_mode = request.form.get('training_mode', 'OPTIMIZED')
     use_recency_bias = request.form.get('use_recency_bias') == 'true'
+
     if training_mode not in TRAINING_CONFIG_OPTIONS and training_mode != 'AUTO':
         abort(400, description=f"Mode training '{training_mode}' tidak valid.")
+        
     with training_lock:
         if training_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Training untuk {pasaran.upper()} sudah berjalan."}), 409
         training_status[pasaran] = 'running'
         training_status[f"{pasaran}_message"] = "Proses training dimulai..."
+
+    # Gunakan wrapper untuk memulai thread
     run_training_in_background_threaded(pasaran, training_mode, use_recency_bias)
     return jsonify({"status": "success", "message": f"Proses training untuk {pasaran.upper()} telah dimulai."})
 
 @manage_thread
 def run_training_in_background_threaded(pasaran: str, training_mode: str, use_recency_bias: bool):
+    """Fungsi ini sekarang di-wrap oleh manage_thread."""
     try:
         logger.info(f"Memulai thread training untuk pasaran: {pasaran} dengan mode: {training_mode}")
         predictor_to_train = get_predictor(pasaran)
@@ -132,6 +148,7 @@ def start_tuning(pasaran):
             return jsonify({"status": "error", "message": f"Optimasi 4D untuk {pasaran.upper()} sudah berjalan."}), 409
         tuning_status[pasaran] = 'running'
         tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter 4D..."
+
     run_tuning_in_background_threaded(pasaran)
     return jsonify({"status": "success", "message": f"Optimasi parameter 4D untuk {pasaran.upper()} telah dimulai."})
 
@@ -169,6 +186,7 @@ def start_cb_tuning(pasaran):
             return jsonify({"status": "error", "message": f"Optimasi CB untuk {pasaran.upper()} sudah berjalan."}), 409
         cb_tuning_status[pasaran] = 'running'
         cb_tuning_status[f"{pasaran}_message"] = "Memulai proses optimasi parameter CB..."
+
     run_cb_tuning_in_background_threaded(pasaran)
     return jsonify({"status": "success", "message": f"Optimasi parameter CB untuk {pasaran.upper()} telah dimulai."})
 
@@ -204,6 +222,7 @@ def start_evaluation(pasaran):
     start_date_str = request.form.get('start_date')
     end_date_str = request.form.get('end_date')
     evaluation_mode = request.form.get('evaluation_mode', 'quick') 
+
     try:
         start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
         end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
@@ -211,12 +230,15 @@ def start_evaluation(pasaran):
             abort(400, description="Tanggal mulai tidak boleh setelah tanggal akhir.")
     except (ValueError, TypeError):
         abort(400, description="Format tanggal tidak valid. Gunakan YYYY-MM-DD.")
+
     with evaluation_lock:
         if evaluation_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Evaluasi untuk {pasaran.upper()} sudah berjalan."}), 409
         evaluation_status[pasaran] = 'running'
         evaluation_status[f"{pasaran}_data"] = None
+
     logger.info(f"Memulai thread evaluasi untuk {pasaran}. Peringatan: Proses ini akan melatih model untuk setiap hari dalam rentang waktu, yang dapat memakan waktu lama.")
+    
     run_evaluation_in_background_threaded(pasaran, start_date, end_date, evaluation_mode)
     return jsonify({"status": "success", "message": f"Proses evaluasi untuk {pasaran.upper()} dimulai. Proses ini akan memakan waktu."})
 
@@ -251,6 +273,7 @@ def update_data(pasaran):
             return jsonify({"status": "error", "message": f"Proses update data untuk {pasaran.upper()} sudah berjalan."}), 409
         update_status[pasaran] = 'running'
         update_status[f"{pasaran}_message"] = "Memulai sinkronisasi data..."
+
     run_data_update_in_background_threaded(pasaran)
     return jsonify({"status": "success", "message": f"Sinkronisasi data untuk {pasaran.upper()} telah dimulai."})
 
@@ -282,8 +305,10 @@ def get_update_status(pasaran):
 def predict(pasaran):
     prediction_date_str = request.form.get('prediction_date')
     evaluation_mode = request.form.get('evaluation_mode', 'deep')
+    
     if not prediction_date_str:
         abort(400, description="Parameter 'prediction_date' tidak boleh kosong.")
+    
     try:
         predictor = get_predictor(pasaran)
         prediction_result = predictor.predict_next_day(
@@ -339,16 +364,19 @@ def debug_model_status(pasaran):
     }
     return jsonify(status)
 
+# PERBAIKAN: Fungsi signal handler untuk graceful shutdown
 def graceful_shutdown(signum, frame):
     logger.info("Shutdown signal received. Waiting for active threads to complete...")
+    # Beri waktu beberapa detik bagi thread untuk selesai
     for thread in active_threads:
         thread.join(timeout=10.0)
     logger.info("All active threads have been handled. Exiting.")
     sys.exit(0)
 
 if __name__ == '__main__':
-    check_dependencies()
-    log_system_info()
-    signal.signal(signal.SIGINT, graceful_shutdown)
-    signal.signal(signal.SIGTERM, graceful_shutdown)
-    serve(app, host='0.0.0.0', port=5000)
+    if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+        check_dependencies()
+        # PERBAIKAN: Daftarkan signal handler
+        signal.signal(signal.SIGINT, graceful_shutdown)
+        signal.signal(signal.SIGTERM, graceful_shutdown)
+    app.run(debug=True, use_reloader=False, host='0.0.0.0', port=5000)

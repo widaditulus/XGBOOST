@@ -148,11 +148,13 @@ document.addEventListener('DOMContentLoaded', function() {
         formData.append('pasaran', currentPasaran);
         formData.append('prediction_date', ui.predictionDateInput.value);
 
-        // PERBAIKAN: Kirim 'evaluation_mode' HANYA jika dalam mode verifikasi.
-        // Untuk prediksi masa depan, backend akan otomatis menggunakan metode terbaik.
+        // UPDATED: Kirim mode evaluasi jika dalam mode verifikasi
         if (ui.verificationModeCheck.checked) {
             const selectedMode = document.querySelector('input[name="predModeOptions"]:checked').value;
             formData.append('evaluation_mode', selectedMode);
+        } else {
+            // Untuk prediksi masa depan, selalu gunakan mode 'deep'
+            formData.append('evaluation_mode', 'deep');
         }
 
         fetchData('/predict', { method: 'POST', body: formData }).then(data => {
@@ -369,6 +371,7 @@ document.addEventListener('DOMContentLoaded', function() {
         updateActivePasaranDisplay();
         ui.evaluationResultArea.style.display = 'block';
         
+        // PERBAIKAN: Menambahkan pesan peringatan untuk pengguna
         ui.evaluationStatus.innerHTML = `<div class="alert alert-warning text-center fw-bold">Peringatan: Proses ini akan melatih model untuk setiap hari. Ini akan memakan waktu lama, namun hasilnya akurat!</div><div class="spinner-border text-info" role="status"></div><p class="mt-2">Menjalankan evaluasi...</p>`;
 
         ui.evaluationDetailTableBody.innerHTML = '';
@@ -393,17 +396,16 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
-    // UPDATED: Memperbaiki logika join string untuk highlight
     const highlightDigitsWithCorrectCommas = (predictions_str, actual_digit) => {
         if (!predictions_str) return '<span>-</span>';
         const digits = predictions_str.split(', ');
-        return digits.map(digit => (digit === actual_digit) ? `<span class="digit-hit">${digit}</span>` : `<span>${digit}</span>`).join(', '); 
+        return digits.map(digit => (digit === actual_digit) ? `<span class="digit-hit">${digit}</span>` : `<span>${digit}</span>`).join(' , '); 
     };
 
     const highlightAMWithCorrectCommas = (predictions_str, actual) => {
         if (!predictions_str) return '<span>-</span>';
         const predictedDigits = predictions_str.split(', ');
-        return predictedDigits.map(digit => (actual && actual.includes(digit)) ? `<span class="digit-hit">${digit}</span>` : `<span>${digit}</span>`).join(', '); 
+        return predictedDigits.map(digit => (actual && actual.includes(digit)) ? `<span class="digit-hit">${digit}</span>` : `<span>${digit}</span>`).join(' , '); 
     };
 
     const highlightCBWithCorrectCommas = (predictions_str, actual) => {
@@ -486,12 +488,14 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    // UPDATED: Fungsi untuk mengatur tampilan mode verifikasi
     function toggleVerificationMode() {
         const isChecked = ui.verificationModeCheck.checked;
         if (isChecked) {
             ui.predictionModeContainer.style.display = 'block';
         } else {
             ui.predictionModeContainer.style.display = 'none';
+            // Set tanggal kembali ke besok jika mode verifikasi dimatikan
             const tomorrow = new Date();
             tomorrow.setDate(new Date().getDate() + 1);
             ui.predictionDateInput.value = tomorrow.toISOString().split('T')[0];
@@ -521,6 +525,7 @@ document.addEventListener('DOMContentLoaded', function() {
         ui.refreshFeatureImportance.addEventListener('click', loadFeatureImportance);
         ui.refreshDriftLog.addEventListener('click', loadDriftLog);
         
+        // UPDATED: Event listener untuk checkbox verifikasi
         ui.verificationModeCheck.addEventListener('change', toggleVerificationMode);
 
         const today = new Date();
@@ -536,7 +541,7 @@ document.addEventListener('DOMContentLoaded', function() {
         
         await updateSystemStatus();
         updateActivePasaranDisplay();
-        toggleVerificationMode();
+        toggleVerificationMode(); // Panggil saat inisialisasi
         ui.loadingOverlay.classList.add('hidden');
     }
     
