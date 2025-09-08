@@ -10,11 +10,10 @@ import xgboost as xgb
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import log_loss
-# PERBAIKAN: Impor gc untuk garbage collection dan time untuk jeda
 import gc
 import time
 
-# Mengimpor FeatureProcessor dan DataManager yang benar dari predictor
+# UPDATED: Impor DataManager dari predictor untuk mencegah kebocoran data
 from predictor import FeatureProcessor, DataManager
 from utils import logger, error_handler
 from constants import MODELS_DIR, MARKET_CONFIGS
@@ -34,10 +33,7 @@ class HyperparameterTuner:
         self.study = None
         self.best_params_ = None
         logger.info(f"TUNER: Mode '{self.mode}' untuk pasaran '{self.pasaran}' digit '{self.digit}'.")
-        data_manager = DataManager(self.pasaran)
-        # Mengambil data mentah. Ini akan digunakan untuk split di _objective
-        self.df_raw = data_manager.get_data(force_refresh=True, force_github=True)
-        self.config = MARKET_CONFIGS[self.pasaran]
+        self.data_manager = DataManager(self.pasaran)
         
     def _objective(self, trial: optuna.Trial) -> float:
         if self.mode == '4D':
@@ -67,21 +63,15 @@ class HyperparameterTuner:
         cv = TimeSeriesSplit(n_splits=TUNING_CONFIG["N_SPLITS"])
         logloss_scores = []
         
-        # PERBAIKAN: Logika rekayasa fitur dipindahkan ke dalam loop TimeSeriesSplit
-        # untuk mencegah data leakage sekecil apa pun. Fitur (misal: rolling mean)
-        # untuk setiap fold kini hanya dihitung berdasarkan data yang tersedia hingga saat itu.
-        for train_idx, val_idx in cv.split(self.df_raw):
-            # 1. Ambil data mentah HANYA untuk fold saat ini (train + validasi)
-            # Ini memastikan tidak ada data dari masa depan (fold berikutnya) yang ikut terproses.
-            current_fold_raw_df = self.df_raw.iloc[:val_idx[-1] + 1].copy()
+        # UPDATED: Pindahkan pemuatan data ke dalam loop untuk mencegah data leakage
+        df_raw = self.data_manager.get_data()
+        
+        for train_idx, val_idx in cv.split(df_raw):
+            current_fold_raw_df = df_raw.iloc[:val_idx[-1] + 1].copy()
 
-            # 2. Lakukan rekayasa fitur pada data fold saat ini.
-            # Instance FeatureProcessor dibuat baru setiap iterasi (stateless).
             fp = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
             processed_fold_df = fp.fit_transform(current_fold_raw_df)
             
-            # 3. Dapatkan kembali index yang sesuai dari dataframe yang sudah diproses.
-            # Hal ini diperlukan karena `fit_transform` dapat menghapus baris awal (misal: karena data tidak cukup untuk rolling window).
             train_rows = processed_fold_df.index.intersection(train_idx)
             val_rows = processed_fold_df.index.intersection(val_idx)
 
@@ -138,13 +128,8 @@ class HyperparameterTuner:
             self.save_best_params()
         
         finally:
-            # PERBAIKAN FINAL: Hancurkan objek studi dan panggil garbage collector
-            # untuk memaksa pelepasan handle file database, lalu hapus file.
-            # Blok finally memastikan ini selalu dijalankan, bahkan jika 'optimize' gagal.
             del study
             gc.collect()
-            
-            # Beri jeda 1 detik untuk memastikan OS Windows sempat melepaskan file lock.
             time.sleep(1)
 
             if os.path.exists(db_file_name):

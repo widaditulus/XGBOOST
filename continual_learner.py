@@ -3,10 +3,13 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, timedelta
 import pandas as pd
-# UPDATED: Menambahkan impor 'threading' yang hilang untuk memperbaiki NameError
 import threading
 from utils import logger
 from constants import CONTINUAL_LEARNING_CONFIG
+
+# UPDATED: Hapus impor 'from predictor import ModelPredictor' untuk memutus circular dependency
+# Tipe hint 'predictor_instance: predictor.ModelPredictor' akan dinonaktifkan
+# karena tidak dapat diselesaikan tanpa impor.
 
 class ContinualLearner:
     def __init__(self, predictor_instance):

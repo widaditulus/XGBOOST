@@ -30,6 +30,46 @@ from evaluation import calculate_brier_score, calculate_ece
 from ensemble_helper import train_ensemble_models, ensemble_predict_proba, train_temporary_ensemble_models
 from continual_learner import ContinualLearner
 
+def _calculate_streak_static(series):
+    change_markers = series.ne(series.shift())
+    cumulative_group_id = change_markers.cumsum()
+    return series.groupby(cumulative_group_id).cumcount() + 1
+
+def _detect_trend_changes_static(series, short_window=5, long_window=15):
+    short_ma = series.rolling(window=short_window, min_periods=1).mean()
+    long_ma = series.rolling(window=long_window, min_periods=1).mean()
+    crossover = ((short_ma > long_ma) & (short_ma.shift(1) < long_ma.shift(1))) | ((short_ma < long_ma) & (short_ma.shift(1) > long_ma.shift(1)))
+    return crossover.astype(int)
+
+def _create_digit_specific_features(args):
+    d, df_copy, timesteps, vol_window, adv_window = args
+    features = {}
+    shifted_d = df_copy[d].shift(1)
+    
+    features[f'{d}_skew_{vol_window}_prev'] = shifted_d.rolling(vol_window).skew()
+    features[f'{d}_kurt_{vol_window}_prev'] = shifted_d.rolling(vol_window).kurt()
+    rolling_mean = shifted_d.rolling(window=adv_window, min_periods=1).mean()
+    rolling_std = shifted_d.rolling(window=adv_window, min_periods=1).std().replace(0, 1)
+    features[f'{d}_zscore_prev'] = (shifted_d - rolling_mean) / rolling_std
+    features[f'{d}_streak_prev'] = _calculate_streak_static(shifted_d)
+    features[f'{d}_trend_change_prev'] = _detect_trend_changes_static(shifted_d)
+    
+    for i in range(1, timesteps + 1):
+        features[f'{d}_lag_{i}'] = df_copy[d].shift(i)
+        
+    for num in range(10):
+        is_num = (df_copy[d] == num)
+        features[f'{d}_{num}_freq_30d'] = is_num.shift(1).rolling(window=30, min_periods=1).sum()
+        is_not_num = (df_copy[d] != num)
+        days_since_seen_series = is_not_num.groupby((is_not_num == False).cumsum()).cumcount()
+        features[f'{d}_{num}_days_since_seen'] = days_since_seen_series.shift(1)
+        
+    short_ma = df_copy[d].shift(1).rolling(window=7, min_periods=1).mean()
+    long_ma = df_copy[d].shift(1).rolling(window=30, min_periods=1).mean()
+    features[f'{d}_delta_ma_7_30'] = short_ma - long_ma
+    
+    return pd.DataFrame(features, index=df_copy.index)
+
 class DataManager:
     def __init__(self, pasaran):
         self.pasaran = pasaran
@@ -92,119 +132,6 @@ class DataManager:
             logger.error(f"Error saat memeriksa kesegaran data: {e}", exc_info=True)
             return {"status": "error", "message": "Terjadi kesalahan saat perbandingan data."}
 
-def _calculate_streak_static(series):
-    change_markers = series.ne(series.shift())
-    cumulative_group_id = change_markers.cumsum()
-    return series.groupby(cumulative_group_id).cumcount() + 1
-
-def _detect_trend_changes_static(series, short_window=5, long_window=15):
-    short_ma = series.rolling(window=short_window, min_periods=1).mean()
-    long_ma = series.rolling(window=long_window, min_periods=1).mean()
-    crossover = ((short_ma > long_ma) & (short_ma.shift(1) < long_ma.shift(1))) | ((short_ma < long_ma) & (short_ma.shift(1) > long_ma.shift(1)))
-    return crossover.astype(int)
-
-def _create_digit_specific_features(args):
-    d, df_copy, timesteps, vol_window, adv_window = args
-    features = {}
-    shifted_d = df_copy[d].shift(1)
-    
-    features[f'{d}_skew_{vol_window}_prev'] = shifted_d.rolling(vol_window).skew()
-    features[f'{d}_kurt_{vol_window}_prev'] = shifted_d.rolling(vol_window).kurt()
-    rolling_mean = shifted_d.rolling(window=adv_window, min_periods=1).mean()
-    rolling_std = shifted_d.rolling(window=adv_window, min_periods=1).std().replace(0, 1)
-    features[f'{d}_zscore_prev'] = (shifted_d - rolling_mean) / rolling_std
-    features[f'{d}_streak_prev'] = _calculate_streak_static(shifted_d)
-    features[f'{d}_trend_change_prev'] = _detect_trend_changes_static(shifted_d)
-    
-    for i in range(1, timesteps + 1):
-        features[f'{d}_lag_{i}'] = df_copy[d].shift(i)
-        
-    for num in range(10):
-        is_num = (df_copy[d] == num)
-        features[f'{d}_{num}_freq_30d'] = is_num.shift(1).rolling(window=30, min_periods=1).sum()
-        is_not_num = (df_copy[d] != num)
-        days_since_seen_series = is_not_num.groupby((is_not_num == False).cumsum()).cumcount()
-        features[f'{d}_{num}_days_since_seen'] = days_since_seen_series.shift(1)
-        
-    short_ma = df_copy[d].shift(1).rolling(window=7, min_periods=1).mean()
-    long_ma = df_copy[d].shift(1).rolling(window=30, min_periods=1).mean()
-    features[f'{d}_delta_ma_7_30'] = short_ma - long_ma
-    
-    return pd.DataFrame(features, index=df_copy.index)
-
-class FeatureProcessor:
-    def __init__(self, timesteps, feature_config):
-        self.timesteps = timesteps
-        self.feature_config = feature_config
-        self.digits = ["as", "kop", "kepala", "ekor"]
-        self.cb_target_cols = [f'cb_target_{i}' for i in range(10)]
-        self.feature_names = []
-        self.executor = ThreadPoolExecutor(max_workers=os.cpu_count())
-
-    def fit_transform(self, df_input: pd.DataFrame) -> pd.DataFrame:
-        df = df_input.copy()
-        
-        df['date'] = pd.to_datetime(df['date'])
-        for i, digit in enumerate(self.digits):
-            df[digit] = df["result"].str[i].astype('int8')
-        for i in range(10):
-            df[f'cb_target_{i}'] = df['result'].str.contains(str(i)).astype(int)
-        
-        base_features = {}
-        digit_cols = df[self.digits]
-        base_features['as_kop_sum_prev'] = (df['as'] + df['kop']).shift(1)
-        base_features['as_kop_diff_prev'] = (df['as'] - df['kop']).shift(1)
-        base_features['as_kop_mul_prev'] = (df['as'] + df['kop']).shift(1)
-        base_features['kepala_ekor_sum_prev'] = (df['kepala'] + df['ekor']).shift(1)
-        base_features['kepala_ekor_diff_prev'] = (df['kepala'] - df['ekor']).shift(1)
-        base_features['kepala_ekor_mul_prev'] = (df['kepala'] * df['ekor']).shift(1)
-        base_features['as_ekor_sum_prev'] = (df['as'] + df['ekor']).shift(1)
-        base_features['kop_kepala_sum_prev'] = (df['kop'] + df['kepala']).shift(1)
-        base_features['digit_sum_prev'] = digit_cols.sum(axis=1).shift(1)
-        base_features['even_count_prev'] = (digit_cols % 2 == 0).sum(axis=1).shift(1)
-        base_features['odd_count_prev'] = (digit_cols % 2 != 0).sum(axis=1).shift(1)
-        base_features['low_count_prev'] = (digit_cols < 5).sum(axis=1).shift(1)
-        base_features['high_count_prev'] = (digit_cols >= 5).sum(axis=1).shift(1)
-        base_features['dayofweek'] = df['date'].dt.dayofweek
-        base_features['is_weekend'] = df['date'].dt.dayofweek.isin([5, 6]).astype(int)
-        base_features['day_sin'] = np.sin(2 * np.pi * df['date'].dt.dayofweek / 6.0)
-        base_features['day_cos'] = np.cos(2 * np.pi * df['date'].dt.dayofweek / 6.0)
-        shifted_digits = df[self.digits].shift(1)
-        base_features['unique_digits_prev'] = shifted_digits.nunique(axis=1)
-        base_features['range_prev'] = shifted_digits.max(axis=1) - shifted_digits.min(axis=1)
-        base_features['twin_count_prev'] = shifted_digits.apply(lambda row: row.value_counts().gt(1).sum(), axis=1)
-        df_base_features = pd.DataFrame(base_features, index=df.index)
-
-        vol_window = self.feature_config.get("volatility_window", 10)
-        adv_window = 30
-        
-        tasks = [(d, df, self.timesteps, vol_window, adv_window) for d in self.digits]
-        
-        all_digit_features = [df_base_features]
-        for future in as_completed(self.executor.submit(_create_digit_specific_features, task) for task in tasks):
-            all_digit_features.append(future.result())
-
-        training_df = pd.concat([df] + all_digit_features, axis=1)
-        
-        self.feature_names = [col for col in training_df.columns if col not in ['date', 'result'] + self.digits + self.cb_target_cols]
-        
-        training_df.dropna(subset=self.feature_names + self.digits, inplace=True)
-        training_df[self.feature_names] = training_df[self.feature_names].fillna(0)
-        
-        return training_df
-
-    def transform_for_prediction(self, historical_df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
-        required_len = max(self.timesteps, 30) + 2 
-        if len(historical_df) < required_len:
-            raise PredictionError(f"Data historis tidak cukup ({len(historical_df)}) untuk prediksi. Perlu {required_len}.")
-
-        pred_row = pd.DataFrame([{'date': target_date, 'result': '0000'}])
-        df_for_calc = pd.concat([historical_df.iloc[-required_len:], pred_row], ignore_index=True)
-        
-        df_with_features = self.fit_transform(df_for_calc)
-        
-        return df_with_features.iloc[[-1]][self.feature_names]
-
 class ModelTrainer:
     def __init__(self, digits, training_params, pasaran):
         self.digits = digits
@@ -239,8 +166,17 @@ class ModelTrainer:
     @error_handler(logger)
     def train_cb_digit_model(self, X_full, y_full, digit, sample_weights=None):
         try:
-            model = xgb.XGBClassifier(**self.training_params) 
-            if 'scale_pos_weight' not in self.training_params:
+            cb_params_path = os.path.join(MODELS_DIR, self.pasaran, f"best_params_cb_{digit}.json")
+            if os.path.exists(cb_params_path):
+                with open(cb_params_path, 'r') as f:
+                    optimized_params = json.load(f)
+                model_params = {**optimized_params, "tree_method": "gpu_hist", "n_jobs": -1}
+                logger.info(f"Menggunakan parameter yang dioptimalkan untuk CB digit {digit}.")
+            else:
+                model_params = self.training_params
+            
+            model = xgb.XGBClassifier(**model_params) 
+            if 'scale_pos_weight' not in model_params:
                 scale_pos_weight = (y_full == 0).sum() / max(1, (y_full == 1).sum())
                 model.set_params(scale_pos_weight=scale_pos_weight)
             model.fit(X_full, y_full, eval_set=[(X_full, y_full)], verbose=False, sample_weight=sample_weights)
@@ -328,7 +264,7 @@ class ModelPredictor:
                 temp_models_4d[digit], temp_encoders[digit] = model, le
                 if not is_evaluation_run:
                     joblib.dump(model, os.path.join(self.model_dir_base, f"model_{digit}.pkl"))
-                    joblib.dump(le, os.path.join(self.model_dir_base, f"encoder_{d}.pkl"))
+                    joblib.dump(le, os.path.join(self.model_dir_base, f"encoder_{digit}.pkl"))
                     if ENSEMBLE_CONFIG.get("USE_ENSEMBLE", False): train_ensemble_models(X_full, y_enc, self.model_dir_base, digit)
                 elif is_evaluation_run and training_mode == 'deep':
                     temp_rf_models[digit], temp_lgbm_models[digit] = train_temporary_ensemble_models(X_full, y_enc, digit)
@@ -383,10 +319,51 @@ class ModelPredictor:
             extra = input_features_set - model_features_set
             raise PredictionError(f"Ketidakcocokan fitur. Hilang: {missing if missing else 'None'}. Tambahan: {extra if extra else 'None'}. Harap latih ulang.")
         return features[model_features]
-
+    
+    @error_handler(logger)
+    def _predict_with_custom_models(self, historical_df, target_date, evaluation_mode, custom_models_4d, custom_cb_models, custom_encoders, feature_names, custom_rf_models, custom_lgbm_models) -> Dict[str, Any]:
+        eval_feature_processor = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
+        latest_features = eval_feature_processor.transform_for_prediction(historical_df, target_date)
+        latest_features = latest_features.reindex(columns=feature_names, fill_value=0)
+        predictions, all_4d_probas = {}, {}
+        for d in self.digits:
+            encoder = custom_encoders.get(d)
+            if not encoder: raise PredictionError(f"Encoder untuk '{d}' tidak tersedia.")
+            if evaluation_mode == 'deep':
+                active_models = {'xgb': custom_models_4d.get(d), 'rf': custom_rf_models.get(d), 'lgbm': custom_lgbm_models.get(d)}
+                loaded_models = {name: model for name, model in active_models.items() if model is not None}
+                if not loaded_models: raise PredictionError(f"Tidak ada model yang termuat untuk digit '{d}'.")
+                probabilities = ensemble_predict_proba(loaded_models, latest_features)[0]
+            else:
+                model = custom_models_4d.get(d)
+                if not model: raise PredictionError(f"Model XGBoost tidak ditemukan untuk digit '{d}'.")
+                probabilities = model.predict_proba(latest_features)[0]
+            all_4d_probas[d] = probabilities
+            top_indices = np.argsort(probabilities)[::-1]
+            top_three_digits = encoder.inverse_transform(top_indices[:3])
+            predictions[d] = [str(digit) for digit in top_three_digits]
+        strategy = CB_STRATEGY_CONFIG.get(self.pasaran, "dedicated")
+        colok_bebas = self._determine_colok_bebas_aggregated(all_4d_probas, custom_encoders) if strategy == "aggregated" else self._determine_colok_bebas_dedicated(latest_features, custom_cb_models)
+        angka_main = self._determine_angka_main(predictions)
+        return {
+            "prediction_date": target_date.strftime("%Y-%m-%d"),
+            "final_4d_prediction": f"{predictions['as'][0]}{predictions['kop'][0]}{predictions['kepala'][0]}{predictions['ekor'][0]}",
+            "kandidat_as": ", ".join(predictions['as']),
+            "kandidat_kop": ", ".join(predictions['kop']),
+            "kandidat_kepala": ", ".join(predictions['kepala']),
+            "kandidat_ekor": ", ".join(predictions['ekor']),
+            "angka_main": ", ".join(angka_main),
+            "colok_bebas": colok_bebas
+        }
+        
     @error_handler(logger)
     def predict_next_day(self, target_date_str: Optional[str] = None, evaluation_mode: str = 'deep') -> Dict[str, Any]:
-        if not self.models_ready: raise PredictionError("Model tidak siap. Silakan jalankan training.")
+        if evaluation_mode == 'deep' and not all(self.rf_models.get(d) is not None and self.lgbm_models.get(d) is not None for d in self.digits):
+            raise PredictionError("Mode 'deep' memerlukan model ensemble. Silakan jalankan training dengan mode 'deep' terlebih dahulu.")
+        
+        if evaluation_mode == 'quick' and not self.models_ready:
+            raise PredictionError("Model XGBoost tidak siap. Silakan jalankan training.")
+
         target_date = pd.to_datetime(target_date_str) if target_date_str else datetime.now() + timedelta(days=1)
         full_df = self.data_manager.get_data()
         historical_df = full_df[full_df['date'] < target_date].copy()
@@ -395,7 +372,7 @@ class ModelPredictor:
         latest_features_raw = self.feature_processor.transform_for_prediction(historical_df, target_date)
         predictions, all_4d_probas = {}, {}
 
-        use_ensemble = all(self.rf_models.get(d) is not None and self.lgbm_models.get(d) is not None for d in self.digits)
+        use_ensemble = (evaluation_mode == 'deep')
         
         logger.info(f"Prediksi untuk {self.pasaran.upper()} pada {target_date_str}. Mode Ensemble: {'Aktif' if use_ensemble else 'Nonaktif'}")
 
@@ -503,41 +480,6 @@ class ModelPredictor:
         summary["retraining_reason"] = f"Akurasi Kepala/Ekor ({summary['kepala_accuracy']:.1%}/{summary['ekor_accuracy']:.1%}) di bawah ambang batas." if summary["retraining_recommended"] else "N/A"
         return {"summary": summary, "results": results_list}
         
-    def _predict_with_custom_models(self, historical_df, target_date, evaluation_mode, custom_models_4d, custom_cb_models, custom_encoders, feature_names, custom_rf_models, custom_lgbm_models) -> Dict[str, Any]:
-        eval_feature_processor = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
-        latest_features = eval_feature_processor.transform_for_prediction(historical_df, target_date)
-        latest_features = latest_features.reindex(columns=feature_names, fill_value=0)
-        predictions, all_4d_probas = {}, {}
-        for d in self.digits:
-            encoder = custom_encoders.get(d)
-            if not encoder: raise PredictionError(f"Encoder untuk '{d}' tidak tersedia.")
-            if evaluation_mode == 'deep':
-                active_models = {'xgb': custom_models_4d.get(d), 'rf': custom_rf_models.get(d), 'lgbm': custom_lgbm_models.get(d)}
-                loaded_models = {name: model for name, model in active_models.items() if model is not None}
-                if not loaded_models: raise PredictionError(f"Tidak ada model yang termuat untuk digit '{d}'.")
-                probabilities = ensemble_predict_proba(loaded_models, latest_features)[0]
-            else:
-                model = custom_models_4d.get(d)
-                if not model: raise PredictionError(f"Model XGBoost tidak ditemukan untuk digit '{d}'.")
-                probabilities = model.predict_proba(latest_features)[0]
-            all_4d_probas[d] = probabilities
-            top_indices = np.argsort(probabilities)[::-1]
-            top_three_digits = encoder.inverse_transform(top_indices[:3])
-            predictions[d] = [str(digit) for digit in top_three_digits]
-        strategy = CB_STRATEGY_CONFIG.get(self.pasaran, "dedicated")
-        colok_bebas = self._determine_colok_bebas_aggregated(all_4d_probas, custom_encoders) if strategy == "aggregated" else self._determine_colok_bebas_dedicated(latest_features, custom_cb_models)
-        angka_main = self._determine_angka_main(predictions)
-        return {
-            "prediction_date": target_date.strftime("%Y-%m-%d"),
-            "final_4d_prediction": f"{predictions['as'][0]}{predictions['kop'][0]}{predictions['kepala'][0]}{predictions['ekor'][0]}",
-            "kandidat_as": ", ".join(predictions['as']),
-            "kandidat_kop": ", ".join(predictions['kop']),
-            "kandidat_kepala": ", ".join(predictions['kepala']),
-            "kandidat_ekor": ", ".join(predictions['ekor']),
-            "angka_main": ", ".join(angka_main),
-            "colok_bebas": colok_bebas
-        }
-        
     @error_handler(drift_logger)
     def _check_for_drift(self, digit: str) -> bool:
         new_importance_path = os.path.join(self.model_dir_base, f"feature_importance_{digit}.csv")
@@ -550,16 +492,4 @@ class ModelPredictor:
             new_df, baseline_df = pd.read_csv(new_importance_path), pd.read_csv(baseline_path)
             top_features = set(baseline_df.head(50)['feature']).union(set(new_df.head(50)['feature']))
             new_df, baseline_df = new_df.set_index('feature').reindex(top_features, fill_value=0), baseline_df.set_index('feature').reindex(top_features, fill_value=0)
-            baseline_dist, new_dist = baseline_df['weight'] / baseline_df['weight'].sum(), new_df['weight'] / new_df['weight'].sum()
-            jaccard_sim = len(set(baseline_df.head(20).index) & set(new_df.head(20).index)) / len(set(baseline_df.head(20).index) | set(new_df.head(20).index))
-            baseline_dist[baseline_dist == 0] = 1e-6
-            new_dist[new_dist == 0] = 1e-6
-            psi = np.sum((new_dist - baseline_dist) * np.log(new_dist / baseline_dist))
-            if jaccard_sim < DRIFT_THRESHOLD or psi > 0.25:
-                drift_logger.warning(f"DRIFT DETECTED for {self.pasaran}-{digit}! Jaccard ({jaccard_sim:.3f}) < {DRIFT_THRESHOLD} or PSI ({psi:.4f}) > 0.25. Updating baseline.")
-                shutil.copy(new_importance_path, baseline_path)
-                return True
-            return False
-        except Exception as e:
-            drift_logger.error(f"Gagal saat memeriksa drift untuk {self.pasaran}-{digit}: {e}")
-            return False
+            baseline_dist, new_dist = baseline_df['weight
