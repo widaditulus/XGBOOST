@@ -393,16 +393,17 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     
+    // UPDATED: Memperbaiki logika join string untuk highlight
     const highlightDigitsWithCorrectCommas = (predictions_str, actual_digit) => {
         if (!predictions_str) return '<span>-</span>';
         const digits = predictions_str.split(', ');
-        return digits.map(digit => (digit === actual_digit) ? `<span class="digit-hit">${digit}</span>` : `<span>${digit}</span>`).join(' , '); 
+        return digits.map(digit => (digit === actual_digit) ? `<span class="digit-hit">${digit}</span>` : `<span>${digit}</span>`).join(', '); 
     };
 
     const highlightAMWithCorrectCommas = (predictions_str, actual) => {
         if (!predictions_str) return '<span>-</span>';
         const predictedDigits = predictions_str.split(', ');
-        return predictedDigits.map(digit => (actual && actual.includes(digit)) ? `<span class="digit-hit">${digit}</span>` : `<span>${digit}</span>`).join(' , '); 
+        return predictedDigits.map(digit => (actual && actual.includes(digit)) ? `<span class="digit-hit">${digit}</span>` : `<span>${digit}</span>`).join(', '); 
     };
 
     const highlightCBWithCorrectCommas = (predictions_str, actual) => {

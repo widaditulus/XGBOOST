@@ -53,6 +53,7 @@ def train_temporary_ensemble_models(X, y_encoded, digit):
     except Exception as e: logger.error(f"EVAL: Gagal melatih model LGBM sementara: {e}")
     return temp_rf_model, temp_lgbm_model
 
+# UPDATED: Menambahkan kembali fungsi validasi dan pengurutan fitur yang hilang
 def _validate_and_reorder_features(features: pd.DataFrame, model: any) -> pd.DataFrame:
     if not hasattr(model, 'feature_names_'):
         raise PredictionError(f"Model '{type(model).__name__}' tidak memiliki 'feature_names_'. Harap latih ulang.")
@@ -70,6 +71,7 @@ def ensemble_predict_proba(models, X):
     for model_name, model in models.items():
         if model:
             try:
+                # UPDATED: Panggil fungsi validasi fitur
                 validated_X = _validate_and_reorder_features(X, model)
                 probas = model.predict_proba(validated_X)
                 all_probas.append(probas)

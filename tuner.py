@@ -13,7 +13,7 @@ from sklearn.metrics import log_loss
 import gc
 import time
 
-# UPDATED: Impor DataManager dari predictor untuk mencegah kebocoran data
+# PERBAIKAN: Import FeatureProcessor dan DataManager dari predictor
 from predictor import FeatureProcessor, DataManager
 from utils import logger, error_handler
 from constants import MODELS_DIR, MARKET_CONFIGS
@@ -34,6 +34,7 @@ class HyperparameterTuner:
         self.best_params_ = None
         logger.info(f"TUNER: Mode '{self.mode}' untuk pasaran '{self.pasaran}' digit '{self.digit}'.")
         self.data_manager = DataManager(self.pasaran)
+        self.config = MARKET_CONFIGS.get(self.pasaran)
         
     def _objective(self, trial: optuna.Trial) -> float:
         if self.mode == '4D':
@@ -63,7 +64,6 @@ class HyperparameterTuner:
         cv = TimeSeriesSplit(n_splits=TUNING_CONFIG["N_SPLITS"])
         logloss_scores = []
         
-        # UPDATED: Pindahkan pemuatan data ke dalam loop untuk mencegah data leakage
         df_raw = self.data_manager.get_data()
         
         for train_idx, val_idx in cv.split(df_raw):

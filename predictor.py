@@ -29,13 +29,18 @@ from data_fetcher import DataFetcher
 from evaluation import calculate_brier_score, calculate_ece
 from ensemble_helper import train_ensemble_models, ensemble_predict_proba, train_temporary_ensemble_models
 from continual_learner import ContinualLearner
+from database import get_latest_data, save_data_to_db
 
 def _calculate_streak_static(series):
-    change_markers = series.ne(series.shift())
+    if series.empty:
+        return pd.Series(np.nan, index=series.index)
+    change_markers = series.ne(series.shift(1))
     cumulative_group_id = change_markers.cumsum()
     return series.groupby(cumulative_group_id).cumcount() + 1
 
 def _detect_trend_changes_static(series, short_window=5, long_window=15):
+    if len(series) < long_window:
+        return pd.Series(0, index=series.index)
     short_ma = series.rolling(window=short_window, min_periods=1).mean()
     long_ma = series.rolling(window=long_window, min_periods=1).mean()
     crossover = ((short_ma > long_ma) & (short_ma.shift(1) < long_ma.shift(1))) | ((short_ma < long_ma) & (short_ma.shift(1) > long_ma.shift(1)))
@@ -46,6 +51,9 @@ def _create_digit_specific_features(args):
     features = {}
     shifted_d = df_copy[d].shift(1)
     
+    if shifted_d.empty:
+        return pd.DataFrame(features, index=df_copy.index)
+
     features[f'{d}_skew_{vol_window}_prev'] = shifted_d.rolling(vol_window).skew()
     features[f'{d}_kurt_{vol_window}_prev'] = shifted_d.rolling(vol_window).kurt()
     rolling_mean = shifted_d.rolling(window=adv_window, min_periods=1).mean()
@@ -61,7 +69,8 @@ def _create_digit_specific_features(args):
         is_num = (df_copy[d] == num)
         features[f'{d}_{num}_freq_30d'] = is_num.shift(1).rolling(window=30, min_periods=1).sum()
         is_not_num = (df_copy[d] != num)
-        days_since_seen_series = is_not_num.groupby((is_not_num == False).cumsum()).cumcount()
+        temp_series = (is_not_num == False)
+        days_since_seen_series = is_not_num.groupby(temp_series.cumsum()).cumcount()
         features[f'{d}_{num}_days_since_seen'] = days_since_seen_series.shift(1)
         
     short_ma = df_copy[d].shift(1).rolling(window=7, min_periods=1).mean()
@@ -69,6 +78,89 @@ def _create_digit_specific_features(args):
     features[f'{d}_delta_ma_7_30'] = short_ma - long_ma
     
     return pd.DataFrame(features, index=df_copy.index)
+
+class FeatureProcessor:
+    def __init__(self, timesteps: int, feature_engineering_config: Dict):
+        self.timesteps = timesteps
+        self.feature_engineering_config = feature_engineering_config
+        self.feature_names = []
+
+    def _create_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df['date'] = pd.to_datetime(df['date'])
+        
+        df['result'] = df['result'].astype(str).str.zfill(4)
+        df = df[df['result'].str.match(r'^\d{4}$')]
+        
+        for d in ['as', 'kop', 'kepala', 'ekor']:
+            df[d] = df['result'].str[d].astype(float)
+        
+        df = df.dropna(subset=['as', 'kop', 'kepala', 'ekor'])
+        for d in ['as', 'kop', 'kepala', 'ekor']:
+             df[d] = df[d].astype(int)
+
+        df['day_of_week'] = df['date'].dt.dayofweek
+        df['month'] = df['date'].dt.month
+        
+        digits = ["as", "kop", "kepala", "ekor"]
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_features = {
+                executor.submit(_create_digit_specific_features, (d, df, self.timesteps, self.feature_engineering_config["volatility_window"], self.feature_engineering_config["frequency_window"])): d
+                for d in digits
+            }
+            results = {d: None for d in digits}
+            for future in as_completed(future_to_features):
+                d = future_to_features[future]
+                try:
+                    results[d] = future.result()
+                except Exception as exc:
+                    logger.error(f"Gagal membuat fitur untuk digit {d}: {exc}", exc_info=True)
+                    results[d] = pd.DataFrame()
+
+        for d in digits:
+            if results[d] is not None:
+                df = df.join(results[d])
+        
+        # PERBAIKAN: Mengisi nilai kosong dengan 0
+        df = df.fillna(0)
+        
+        # PERBAIKAN: Menghapus baris yang mungkin memiliki NaN
+        # setelah pengisian, biasanya baris di awal yang tidak memiliki
+        # cukup data historis.
+        df.dropna(inplace=True)
+
+        if df.empty:
+            raise TrainingError("Data habis setelah proses pembuatan fitur.")
+
+        self.feature_names = [col for col in df.columns if col not in ['date', 'result', 'as', 'kop', 'kepala', 'ekor', 'cb_target']]
+        
+        for i in range(10):
+            df[f'cb_target_{i}'] = df['result'].str.contains(str(i)).astype(int)
+        
+        return df
+
+    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        return self._create_features(df)
+
+    def transform_for_prediction(self, df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
+        df_transformed = self._create_features(df)
+        
+        last_row = pd.Series({
+            'date': target_date,
+            'result': '9999'
+        })
+        df_transformed = pd.concat([df_transformed, pd.DataFrame([last_row])], ignore_index=True)
+        df_transformed = self._create_features(df_transformed)
+        
+        X_pred = df_transformed.iloc[[-1]][self.feature_names]
+        
+        for col in X_pred.columns:
+            if 'lag_1' in col or 'prev' in col:
+                X_pred[col] = np.nan
+        
+        return X_pred.dropna(axis=1)
+
 
 class DataManager:
     def __init__(self, pasaran):
@@ -105,11 +197,23 @@ class DataManager:
     def get_data(self, force_refresh: bool = False, force_github: bool = False) -> Optional[pd.DataFrame]:
         with self.lock:
             if self.df is None or force_refresh:
-                df_raw = self.fetcher.fetch_data(force_github=force_github)
-                df_validated = self._validate_data(df_raw)
-                df_sorted = df_validated.sort_values("date").reset_index(drop=True)
-                self.df = df_sorted
-            return self.df.copy()
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        df_raw = self.fetcher.fetch_data(force_github=force_github or (attempt > 0))
+                        df_validated = self._validate_data(df_raw)
+                        df_sorted = df_validated.sort_values("date").reset_index(drop=True)
+                        self.df = df_sorted
+                        
+                        if self.df is not None and not self.df.empty:
+                            break
+                            
+                    except Exception as e:
+                        logger.warning(f"Percobaan {attempt + 1}/{max_retries} gagal: {e}")
+                        if attempt == max_retries - 1:
+                            raise DataFetchingError(f"Gagal mendapatkan data setelah {max_retries} percobaan: {e}")
+            
+            return self.df.copy() if self.df is not None else None
 
     @error_handler(logger)
     def check_data_freshness(self) -> Dict[str, Any]:
@@ -240,11 +344,42 @@ class ModelPredictor:
     @error_handler(logger)
     def train_model(self, training_mode: str = 'OPTIMIZED', use_recency_bias: bool = True, custom_data: Optional[pd.DataFrame] = None) -> Any:
         is_evaluation_run = (custom_data is not None)
-        df_full = custom_data if is_evaluation_run else self.data_manager.get_data(force_refresh=True)
-        training_df = self.feature_processor.fit_transform(df_full)
-        current_feature_names = self.feature_processor.feature_names
+        
+        df_full = custom_data
+        if not is_evaluation_run:
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    df_full = self.data_manager.get_data(force_refresh=(attempt > 0))
+                    if df_full is not None and not df_full.empty:
+                        break
+                except Exception as e:
+                    logger.warning(f"Percobaan {attempt + 1}/{max_retries} gagal mendapatkan data: {e}")
+                    if attempt == max_retries - 1:
+                        raise TrainingError(f"Gagal mendapatkan data setelah {max_retries} percobaan: {e}")
+            
+        if df_full is None or df_full.empty:
+            logger.warning("Data masih kosong, memaksa ambil dari GitHub...")
+            try:
+                df_full = self.data_manager.get_data(force_refresh=True, force_github=True)
+            except Exception as e:
+                raise TrainingError(f"Gagal mendapatkan data bahkan dengan force GitHub: {e}")
+            
+        self.feature_processor = FeatureProcessor(self.config["strategy"]["timesteps"], self.config["feature_engineering"])
+        
+        try:
+            training_df = self.feature_processor.fit_transform(df_full)
+        except Exception as e:
+            raise TrainingError(f"Gagal memproses fitur: {e}")
+            
         if len(training_df) < self.config["strategy"]["min_training_samples"]:
-            raise TrainingError(f"Data tidak cukup. Perlu {self.config['strategy']['min_training_samples']}, tersedia {len(training_df)}.")
+            if len(training_df) > 50:
+                logger.warning(f"Data tidak cukup ({len(training_df)}), tetapi akan dilanjutkan training dengan data yang ada")
+            else:
+                raise TrainingError(f"Data tidak cukup. Perlu {self.config['strategy']['min_training_samples']}, tersedia {len(training_df)}.")
+        
+        current_feature_names = self.feature_processor.feature_names
+        
         if not is_evaluation_run: os.makedirs(self.model_dir_base, exist_ok=True)
         sample_weights = None
         if use_recency_bias and ADAPTIVE_LEARNING_CONFIG["USE_RECENCY_WEIGHTING"]:
@@ -492,4 +627,21 @@ class ModelPredictor:
             new_df, baseline_df = pd.read_csv(new_importance_path), pd.read_csv(baseline_path)
             top_features = set(baseline_df.head(50)['feature']).union(set(new_df.head(50)['feature']))
             new_df, baseline_df = new_df.set_index('feature').reindex(top_features, fill_value=0), baseline_df.set_index('feature').reindex(top_features, fill_value=0)
-            baseline_dist, new_dist = baseline_df['weight
+            baseline_dist, new_dist = baseline_df['weight'].to_numpy(), new_df['weight'].to_numpy()
+            
+            baseline_dist = baseline_dist / np.sum(baseline_dist)
+            new_dist = new_dist / np.sum(new_dist)
+            
+            m = 0.5 * (baseline_dist + new_dist)
+            jsd = 0.5 * np.sum(baseline_dist * np.log(baseline_dist / m)) + 0.5 * np.sum(new_dist * np.log(new_dist / m))
+            
+            jsd = jsd.real
+            
+            logger.info(f"Drift untuk {self.pasaran}-{digit}: JSD = {jsd:.4f} (Ambang batas: {DRIFT_THRESHOLD})")
+            if jsd > DRIFT_THRESHOLD:
+                drift_logger.warning(f"DRIFT DETECTED: Pergeseran fitur signifikan pada model {self.pasaran.upper()}-{digit.upper()}. JSD = {jsd:.4f}")
+                return True
+            return False
+        except Exception as e:
+            drift_logger.error(f"Error saat memeriksa drift pada {self.pasaran}-{digit}: {e}", exc_info=True)
+            return False
