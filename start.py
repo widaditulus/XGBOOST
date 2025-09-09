@@ -3,7 +3,7 @@
 # Gunakan ini untuk deployment, bukan 'python app.py'
 
 from waitress import serve
-from app import app, active_threads # UPDATED: Import active_threads untuk graceful shutdown
+from app import app, active_threads
 import os
 import dotenv
 from utils import logger, check_dependencies
@@ -14,9 +14,9 @@ import sys
 # UPDATED: Memastikan graceful shutdown menangani semua thread aktif
 def graceful_shutdown(signum, frame):
     logger.info("Shutdown signal received. Waiting for active threads to complete...")
-    # Beri waktu beberapa detik bagi thread untuk selesai
+    # UPDATED: Menghapus timeout untuk memastikan semua thread selesai sepenuhnya, mencegah kerusakan file.
     for thread in active_threads:
-        thread.join(timeout=10.0)
+        thread.join()
     logger.info("All active threads have been handled. Exiting.")
     sys.exit(0)
 

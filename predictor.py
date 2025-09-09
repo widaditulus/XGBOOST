@@ -1,4 +1,4 @@
-# predictor.py (FINAL - CPU SAJA)
+# predictor.py (FINAL - CPU SAJA, PERBAIKAN INTEGRITAS DATA)
 # BEJO
 # -*- coding: utf-8 -*-
 import os
@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any
 from collections import OrderedDict
 
-from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 import lightgbm as lgb
 import re
@@ -30,7 +30,7 @@ from evaluation import calculate_brier_score, calculate_ece
 from ensemble_helper import train_ensemble_models, ensemble_predict_proba, train_temporary_ensemble_models
 from continual_learner import ContinualLearner
 
-# --- Class DataManager dan FeatureProcessor TIDAK ADA PERUBAHAN ---
+# --- Class DataManager TIDAK ADA PERUBAHAN ---
 class DataManager:
     def __init__(self, pasaran):
         self.pasaran = pasaran
@@ -129,6 +129,11 @@ class FeatureProcessor:
         new_features = {}
         digit_cols = df[self.digits]
 
+        new_features['as_kepala_diff_prev'] = (df['as'] - df['kepala']).abs().shift(1)
+        new_features['kop_ekor_mul_prev'] = (df['kop'] * df['ekor']).shift(1)
+        new_features['as_ekor_diff_prev'] = (df['as'] - df['ekor']).abs().shift(1)
+        new_features['kop_kepala_diff_prev'] = (df['kop'] - df['kepala']).abs().shift(1)
+
         new_features['as_kop_sum_prev'] = (df['as'] + df['kop']).shift(1)
         new_features['as_kop_diff_prev'] = (df['as'] - df['kop']).shift(1)
         new_features['as_kop_mul_prev'] = (df['as'] * df['kop']).shift(1)
@@ -183,6 +188,22 @@ class FeatureProcessor:
                 not_is_num = (df[d] != num)
                 days_since_seen_series = not_is_num.groupby(not_is_num.cumsum()).cumcount()
                 new_features[f'{d}_{num}_days_since_seen'] = days_since_seen_series.shift(1)
+        
+        for d in self.digits:
+            shifted_d = df[d].shift(1)
+            for window in [90, 180, 365]:
+                if len(df) > window:
+                    new_features[f'{d}_mean_{window}d_prev'] = shifted_d.rolling(window, min_periods=1).mean()
+                    new_features[f'{d}_std_{window}d_prev'] = shifted_d.rolling(window, min_periods=1).std()
+
+            shifted_d_int = shifted_d.fillna(-1).astype(int)
+            one_hot_digits = pd.get_dummies(shifted_d_int, prefix=d).reindex(columns=[f'{d}_{i}' for i in range(10)], fill_value=0)
+            
+            for window in [30, 90]:
+                if len(df) > window:
+                    rolling_freq = one_hot_digits.rolling(window, min_periods=1).sum() / window
+                    for i in range(10):
+                        new_features[f'{d}_{i}_freq_{window}d_prev'] = rolling_freq[f'{d}_{i}']
 
         shifted_digits = df[self.digits].shift(1)
         new_features['unique_digits_prev'] = shifted_digits.nunique(axis=1)
@@ -200,26 +221,39 @@ class FeatureProcessor:
         self.feature_names = [col for col in training_df.columns if col not in ['date', 'result'] + self.digits + self.cb_target_cols]
         
         for col in self.feature_names:
-            if training_df[col].dtype == 'float64' or training_df[col].dtype == 'float32':
+            if pd.api.types.is_numeric_dtype(training_df[col]):
                 training_df[col] = training_df[col].replace([np.inf, -np.inf], np.nan)
 
-        training_df.dropna(subset=self.feature_names + self.digits, inplace=True)
-        training_df[self.feature_names] = training_df[self.feature_names].fillna(0)
+        initial_rows = len(training_df)
+        training_df.dropna(subset=self.digits + self.feature_names, inplace=True)
+        final_rows = len(training_df)
+
+        if initial_rows > 0:
+            rows_dropped = initial_rows - final_rows
+            if rows_dropped > 0:
+                percentage_dropped = (rows_dropped / initial_rows) * 100
+                logger.warning(f"FeatureProcessor: Dihapus {rows_dropped} dari {initial_rows} baris ({percentage_dropped:.2f}%) karena mengandung nilai NaN/inf. Sisa data untuk training: {final_rows} baris.")
+
+        if not training_df.empty:
+            training_df[self.feature_names] = training_df[self.feature_names].fillna(0)
 
         return training_df
 
     def transform_for_prediction(self, historical_df: pd.DataFrame, target_date: datetime) -> pd.DataFrame:
-        required_len = max(self.timesteps, 30) + 1 
+        required_len = max(self.timesteps, 365) + 1 
         if len(historical_df) < required_len:
-            raise PredictionError(f"Data historis tidak cukup ({len(historical_df)}) untuk prediksi. Perlu {required_len}.")
+            logger.warning(f"Data historis tidak cukup ({len(historical_df)}) untuk fitur jangka panjang. Perlu {required_len}. Beberapa fitur mungkin NaN.")
 
         pred_row = pd.DataFrame([{'date': target_date, 'result': '0000'}])
         df_for_calc = pd.concat([historical_df.iloc[-required_len:], pred_row], ignore_index=True)
         df_for_calc['date'] = pd.to_datetime(df_for_calc['date'])
 
         df_with_features = self.fit_transform(df_for_calc)
-
-        return df_with_features.iloc[[-1]][self.feature_names]
+        
+        final_features = df_with_features.iloc[[-1]][self.feature_names]
+        final_features.fillna(0, inplace=True)
+        
+        return final_features
 
 class ModelTrainer:
     def __init__(self, digits, training_params, pasaran):
@@ -231,13 +265,14 @@ class ModelTrainer:
     def train_digit_model(self, X_full, y_full, digit, existing_model=None, feature_subset=None, sample_weights=None):
         try:
             if not all(np.isfinite(X_full.values.flatten())):
-                raise ValueError("Input data contains NaN or infinite values.")
+                logger.error(f"TRAINING GAGAL: Input data untuk digit {digit} mengandung NaN atau infinite values.")
+                return None, None, None, None
 
             xgb_params = self.training_params
             le = LabelEncoder()
             y_encoded = le.fit_transform(y_full)
             if len(le.classes_) < 2: 
-                logger.warning(f"TRAINING GAGAL: Kurang dari 2 kelas unik untuk digit {digit}. Training dilewati.")
+                logger.warning(f"TRAINING DILEWATI: Kurang dari 2 kelas unik untuk digit {digit}. Data hanya berisi kelas: {list(le.classes_)}. Training dilewati.")
                 return None, None, None, None
             X_train = X_full[feature_subset] if feature_subset else X_full
 
@@ -288,6 +323,8 @@ class ModelPredictor:
         self.rf_models: Dict[str, Optional[RandomForestClassifier]] = {d: None for d in self.digits}
         self.lgbm_models: Dict[str, Optional[lgb.LGBMClassifier]] = {d: None for d in self.digits}
         self.label_encoders: Dict[str, Optional[LabelEncoder]] = {d: None for d in self.digits}
+        self.scaler: Optional[StandardScaler] = None
+        self.model_feature_names: List[str] = []
         try:
             self.data_manager.get_data()
         except DataFetchingError as e:
@@ -340,6 +377,18 @@ class ModelPredictor:
                 self.cb_models[str(i)] = joblib.load(cb_model_path)
                 if hasattr(self.cb_models[str(i)], 'feature_names_'): cb_loaded += 1
                 else: self.cb_models[str(i)] = None
+
+        scaler_path = os.path.join(self.model_dir_base, "scaler.pkl")
+        if os.path.exists(scaler_path):
+            self.scaler = joblib.load(scaler_path)
+            logger.info(f"Scaler untuk {self.pasaran} berhasil dimuat.")
+        else:
+            self.scaler = None
+            
+        features_path = os.path.join(self.model_dir_base, "model_features.json")
+        if os.path.exists(features_path):
+            with open(features_path, 'r') as f:
+                self.model_feature_names = json.load(f)
         
         return xgb_loaded == len(self.digits) and cb_loaded == 10
 
@@ -355,27 +404,69 @@ class ModelPredictor:
         training_df = feature_processor.fit_transform(df_full)
         current_feature_names = feature_processor.feature_names
 
+        if training_df.empty:
+            raise TrainingError("Data menjadi kosong setelah proses feature engineering dan pembersihan. Kemungkinan terlalu banyak nilai NaN yang dihasilkan. Periksa data sumber atau logika fitur.")
+
         if len(training_df) < self.config["strategy"]["min_training_samples"]:
             raise TrainingError(f"Data tidak cukup. Perlu {self.config['strategy']['min_training_samples']}, tersedia {len(training_df)}.")
         
         if not is_evaluation_run: os.makedirs(self.model_dir_base, exist_ok=True)
         
+        # --- UPDATED: PERBAIKAN FUNDAMENTAL PADA ALUR DATA & PENYELARASAN INDEKS ---
+
+        # Langkah 1: Pisahkan X dan y SEBELUM melakukan modifikasi apa pun pada X.
+        X_full_raw = training_df[current_feature_names].copy()
+        y_all_digits = training_df[self.digits].copy()
+        cb_all_digits = training_df[[f'cb_target_{i}' for i in range(10)]].copy()
+
+        # Dapatkan sample_weights sebelum indeks diubah
         sample_weights = None
         if use_recency_bias and ADAPTIVE_LEARNING_CONFIG["USE_RECENCY_WEIGHTING"]:
             days_since_latest = (training_df['date'].max() - training_df['date']).dt.days
             decay_rate = np.log(2) / ADAPTIVE_LEARNING_CONFIG["RECENCY_HALF_LIFE_DAYS"]
             sample_weights = pd.Series(np.exp(-decay_rate * days_since_latest), index=training_df.index)
+
+        # Langkah 2: Lakukan penghapusan fitur konstan (varians nol) pada salinan X.
+        constant_columns = X_full_raw.columns[X_full_raw.nunique() == 1].tolist()
+        if constant_columns:
+            logger.warning(f"Ditemukan dan dihapus {len(constant_columns)} fitur konstan (varians nol): {constant_columns}")
+            X_full_raw.drop(columns=constant_columns, inplace=True)
         
-        X_full = training_df[current_feature_names].copy()
-        
+        self.model_feature_names = X_full_raw.columns.tolist()
+
+        # Langkah 3: Lakukan scaling, dan pastikan indeks dipertahankan dengan benar.
+        self.scaler = StandardScaler()
+        X_full_scaled = pd.DataFrame(
+            self.scaler.fit_transform(X_full_raw),
+            index=X_full_raw.index,  # Menggunakan indeks asli dari X_full_raw
+            columns=self.model_feature_names
+        )
+
+        # Langkah 4: Simpan scaler dan daftar fitur yang valid
+        if not is_evaluation_run:
+            joblib.dump(self.scaler, os.path.join(self.model_dir_base, "scaler.pkl"))
+            with open(os.path.join(self.model_dir_base, "model_features.json"), 'w') as f:
+                json.dump(self.model_feature_names, f)
+            logger.info(f"Scaler dan daftar fitur untuk {self.pasaran} berhasil disimpan.")
+
         temp_models_4d, temp_cb_models, temp_encoders, temp_rf_models, temp_lgbm_models = {}, {}, {}, {}, {}
         successful_trains = 0
+        error_messages = []
 
         for digit in self.digits:
-            y_full = training_df[digit]
-            if y_full.nunique() < 2: 
-                logger.warning(f"Training untuk {digit} dilewati: Kurang dari 2 kelas unik.")
+            y_full = y_all_digits[digit]
+            
+            common_index = X_full_scaled.index.intersection(y_full.index)
+            X_train = X_full_scaled.loc[common_index]
+            y_train = y_full.loc[common_index]
+
+            if y_train.nunique() < 2: 
+                msg = f"Training untuk {digit} dilewati: Kurang dari 2 kelas unik setelah penyelarasan data."
+                logger.warning(msg)
+                error_messages.append(msg)
                 continue
+
+            aligned_sample_weights = sample_weights.loc[common_index] if sample_weights is not None else None
 
             config_key = training_mode if training_mode in TRAINING_CONFIG_OPTIONS else 'OPTIMIZED'
             if training_mode == 'AUTO':
@@ -388,7 +479,7 @@ class ModelPredictor:
                 training_params = TRAINING_CONFIG_OPTIONS[config_key]["xgb_params"].get(digit, {})
 
             model_trainer = ModelTrainer(self.digits, training_params, self.pasaran)
-            model, le, imp, y_enc = model_trainer.train_digit_model(X_full, y_full, digit, sample_weights=sample_weights)
+            model, le, imp, y_enc = model_trainer.train_digit_model(X_train, y_train, digit, sample_weights=aligned_sample_weights)
             
             if model and le and imp:
                 successful_trains += 1
@@ -397,16 +488,30 @@ class ModelPredictor:
                     joblib.dump(model, os.path.join(self.model_dir_base, f"model_{digit}.pkl"))
                     joblib.dump(le, os.path.join(self.model_dir_base, f"encoder_{digit}.pkl"))
                     self._save_feature_importance(imp, digit)
+                    y_enc_df = pd.Series(y_enc, index=X_train.index)
                     if ENSEMBLE_CONFIG.get("USE_ENSEMBLE", False): 
-                        train_ensemble_models(X_full, y_enc, self.model_dir_base, digit)
+                        train_ensemble_models(X_train, y_enc_df, self.model_dir_base, digit)
                 elif is_evaluation_run:
-                    temp_rf_models[digit], temp_lgbm_models[digit] = train_temporary_ensemble_models(X_full, y_enc, digit)
+                    y_enc_df = pd.Series(y_enc, index=X_train.index)
+                    temp_rf_models[digit], temp_lgbm_models[digit] = train_temporary_ensemble_models(X_train, y_enc_df, digit)
+            else:
+                error_messages.append(f"Model untuk digit '{digit}' gagal dilatih. Periksa log di atas untuk detail.")
 
         for i in range(10):
-            digit = str(i)
+            digit_cb = str(i)
+            y_cb_full = cb_all_digits[f'cb_target_{digit_cb}']
+            
+            common_index_cb = X_full_scaled.index.intersection(y_cb_full.index)
+            X_train_cb = X_full_scaled.loc[common_index_cb]
+            y_train_cb = y_cb_full.loc[common_index_cb]
+
+            if y_train_cb.nunique() < 2: continue
+            
+            aligned_sample_weights_cb = sample_weights.loc[common_index_cb] if sample_weights is not None else None
+
             config_key = training_mode if training_mode in TRAINING_CONFIG_OPTIONS else 'OPTIMIZED'
             if training_mode == 'AUTO':
-                 params_path = os.path.join(self.model_dir_base, f"best_params_cb_{digit}.json")
+                 params_path = os.path.join(self.model_dir_base, f"best_params_cb_{digit_cb}.json")
                  if os.path.exists(params_path):
                     with open(params_path, 'r') as f: cb_params = json.load(f)
                  else:
@@ -415,20 +520,19 @@ class ModelPredictor:
                  cb_params = TRAINING_CONFIG_OPTIONS[config_key].get("cb_params")
             
             cb_trainer = ModelTrainer(self.digits, cb_params, self.pasaran)
-            y_cb = training_df[f'cb_target_{digit}']
-            if y_cb.nunique() < 2: continue
-            cb_model = cb_trainer.train_cb_digit_model(X_full, y_cb, digit, sample_weights=sample_weights)
+            cb_model = cb_trainer.train_cb_digit_model(X_train_cb, y_train_cb, digit_cb, sample_weights=aligned_sample_weights_cb)
             if cb_model:
-                temp_cb_models[digit] = cb_model
-                if not is_evaluation_run: joblib.dump(cb_model, os.path.join(self.model_dir_base, f"model_cb_{digit}.pkl"))
+                temp_cb_models[digit_cb] = cb_model
+                if not is_evaluation_run: joblib.dump(cb_model, os.path.join(self.model_dir_base, f"model_cb_{digit_cb}.pkl"))
 
         if not is_evaluation_run and successful_trains < len(self.digits):
              logger.warning(f"Training selesai, namun hanya {successful_trains}/{len(self.digits)} model yang berhasil dibuat.")
         if not is_evaluation_run and successful_trains == 0:
-            raise TrainingError("GAGAL TOTAL: Tidak ada satupun model digit (AS, KOP, KEPALA, EKOR) yang berhasil dilatih.")
+            error_summary = " | ".join(error_messages)
+            raise TrainingError(f"GAGAL TOTAL: Tidak ada model yang berhasil dilatih. Laporan: [ {error_summary} ]")
 
         if is_evaluation_run:
-            return temp_models_4d, temp_cb_models, temp_encoders, current_feature_names, temp_rf_models, temp_lgbm_models
+            return temp_models_4d, temp_cb_models, temp_encoders, self.model_feature_names, temp_rf_models, temp_lgbm_models
 
         self.models_ready = self.load_models(load_ensemble=True)
         return self.models_ready
@@ -466,11 +570,14 @@ class ModelPredictor:
 
     def _validate_and_reorder_features(self, features: pd.DataFrame, model: Any) -> pd.DataFrame:
         if not hasattr(model, 'feature_names_'):
-            raise PredictionError(f"Model '{type(model).__name__}' tidak memiliki 'feature_names_'. Harap latih ulang.")
-        
-        model_features = model.feature_names_
+            if not self.model_feature_names:
+                raise PredictionError(f"Model '{type(model).__name__}' tidak memiliki 'feature_names_' dan tidak ada daftar fitur cadangan.")
+            model_features = self.model_feature_names
+        else:
+            model_features = model.feature_names_
+
         if pd.Series(model_features).duplicated().any():
-             raise PredictionError("Fitur model dari file .pkl mengandung duplikat. Latih ulang model.")
+             raise PredictionError("Fitur model mengandung duplikat. Latih ulang model.")
         
         input_features_set = set(features.columns)
         model_features_set = set(model_features)
@@ -479,14 +586,11 @@ class ModelPredictor:
             missing_in_input = list(model_features_set - input_features_set)
             extra_in_input = list(input_features_set - model_features_set)
             
-            if not missing_in_input and not extra_in_input:
-                 return features[model_features]
-
             error_msg = (
                 f"Ketidakcocokan fitur. "
                 f"Hilang di input: {missing_in_input if missing_in_input else 'None'}. "
                 f"Tambahan di input: {extra_in_input if extra_in_input else 'None'}. "
-                f"Harap latih ulang model atau perbaiki Feature Engineering."
+                f"Harap latih ulang model."
             )
             raise PredictionError(error_msg)
         
@@ -509,6 +613,16 @@ class ModelPredictor:
             raise PredictionError(f"Tidak ada data historis sebelum {target_date.strftime('%Y-%m-%d')}.")
 
         latest_features_raw = self.feature_processor.transform_for_prediction(historical_df, target_date)
+        
+        if self.model_feature_names:
+            latest_features_raw = latest_features_raw.reindex(columns=self.model_feature_names, fill_value=0)
+
+        if self.scaler:
+            latest_features_scaled = self.scaler.transform(latest_features_raw)
+            latest_features = pd.DataFrame(latest_features_scaled, index=latest_features_raw.index, columns=latest_features_raw.columns)
+        else:
+            logger.warning("Scaler tidak ditemukan. Prediksi dilanjutkan tanpa normalisasi fitur.")
+            latest_features = latest_features_raw
         
         predictions, all_4d_probas = {}, {}
         
@@ -540,9 +654,9 @@ class ModelPredictor:
                 }
                 loaded_models = {name: model for name, model in active_models.items() if model is not None}
                 if not loaded_models: raise PredictionError(f"Tidak ada model yang termuat untuk digit '{d}' dalam mode deep.")
-                probabilities = ensemble_predict_proba(loaded_models, latest_features_raw)[0]
+                probabilities = ensemble_predict_proba(loaded_models, latest_features)[0]
             else: 
-                validated_features = self._validate_and_reorder_features(latest_features_raw, xgb_model)
+                validated_features = self._validate_and_reorder_features(latest_features, xgb_model)
                 probabilities = xgb_model.predict_proba(validated_features)[0]
             
             all_4d_probas[d] = probabilities
@@ -555,7 +669,7 @@ class ModelPredictor:
         main_model_for_schema = xgb_models_to_use.get('as')
         if not main_model_for_schema: raise PredictionError("Model 'as' tidak ditemukan untuk skema fitur CB.")
         
-        validated_features_for_cb = self._validate_and_reorder_features(latest_features_raw, main_model_for_schema)
+        validated_features_for_cb = self._validate_and_reorder_features(latest_features, main_model_for_schema)
         
         if strategy == "dedicated" and cb_models_to_use:
             colok_bebas = self._determine_colok_bebas_dedicated(validated_features_for_cb, cb_models_to_use)

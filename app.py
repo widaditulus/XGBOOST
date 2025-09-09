@@ -7,7 +7,7 @@ import json
 from flask import Flask, request, jsonify, render_template, abort
 from datetime import datetime
 import threading
-from functools import wraps, lru_cache
+from functools import wraps
 import pandas as pd
 import signal
 import sys
@@ -23,6 +23,10 @@ from tuner import HyperparameterTuner
 
 app = Flask(__name__, template_folder='.', static_folder='.', static_url_path='')
 
+# UPDATED: Mengganti lru_cache dengan mekanisme caching berbasis dictionary sederhana untuk mencegah kebocoran memori
+predictor_cache = {}
+predictor_lock = threading.Lock()
+
 active_threads = []
 
 training_status = {}
@@ -33,10 +37,9 @@ update_status = {}
 update_lock = threading.Lock()
 tuning_status = {}
 tuning_lock = threading.Lock()
-cb_tuning_status = {} 
+cb_tuning_status = {}
 cb_tuning_lock = threading.Lock()
 
-# ... (Kode errorhandler, validate_pasaran, get_predictor, index, data_status tetap sama)
 @app.errorhandler(Exception)
 def handle_unexpected_error(e):
     if hasattr(e, 'code') and 400 <= e.code < 600:
@@ -55,10 +58,19 @@ def validate_pasaran(f):
         return f(*args, **kwargs)
     return decorated_function
 
-@lru_cache(maxsize=10)
+# UPDATED: Menghapus lru_cache dan mengimplementasikan cache manual yang aman untuk thread
 def get_predictor(pasaran: str) -> ModelPredictor:
-    logger.info(f"LRU CACHE: Mengakses predictor untuk: {pasaran.upper()}")
-    return ModelPredictor(pasaran)
+    """
+    Mengambil atau membuat instance ModelPredictor untuk pasaran tertentu.
+    Menggunakan cache sederhana yang aman untuk thread.
+    """
+    with predictor_lock:
+        if pasaran not in predictor_cache:
+            logger.info(f"CACHE MISS: Membuat instance predictor baru untuk: {pasaran.upper()}")
+            predictor_cache[pasaran] = ModelPredictor(pasaran)
+        else:
+            logger.info(f"CACHE HIT: Menggunakan instance predictor dari cache untuk: {pasaran.upper()}")
+        return predictor_cache[pasaran]
 
 @app.route('/')
 def index():
@@ -95,6 +107,7 @@ def start_training(pasaran):
     if training_mode not in TRAINING_CONFIG_OPTIONS and training_mode != 'AUTO':
         abort(400, description=f"Mode training '{training_mode}' tidak valid.")
         
+    # UPDATED: Lock diperoleh SEBELUM pengecekan status untuk mencegah race condition
     with training_lock:
         if training_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Training untuk {pasaran.upper()} sudah berjalan."}), 409
@@ -114,7 +127,6 @@ def run_training_in_background_threaded(pasaran: str, training_mode: str, use_re
         with training_lock:
             training_status[pasaran] = "completed"
             training_status[f"{pasaran}_message"] = f"Model untuk {pasaran.upper()} berhasil diperbarui."
-    # UPDATED: Blok except diperbaiki untuk memberikan pesan error yang lebih baik
     except TrainingError as e:
         with training_lock:
             training_status[pasaran] = "failed"
@@ -126,7 +138,6 @@ def run_training_in_background_threaded(pasaran: str, training_mode: str, use_re
             training_status[f"{pasaran}_message"] = f"Error Tak Terduga: {str(e)}"
         logger.error(f"Exception di thread training untuk {pasaran}: {e}", exc_info=True)
 
-# ... (Sisa kode di app.py TIDAK ADA PERUBAHAN)
 @app.route('/training-status', methods=['GET'])
 @validate_pasaran
 def get_training_status(pasaran):
@@ -138,6 +149,7 @@ def get_training_status(pasaran):
 @app.route('/start-tuning', methods=['POST'])
 @validate_pasaran
 def start_tuning(pasaran):
+    # UPDATED: Lock diperoleh SEBELUM pengecekan status untuk mencegah race condition
     with tuning_lock:
         if tuning_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Optimasi 4D untuk {pasaran.upper()} sudah berjalan."}), 409
@@ -176,6 +188,7 @@ def get_tuning_status(pasaran):
 @app.route('/start-tuning-cb', methods=['POST'])
 @validate_pasaran
 def start_cb_tuning(pasaran):
+    # UPDATED: Lock diperoleh SEBELUM pengecekan status untuk mencegah race condition
     with cb_tuning_lock:
         if cb_tuning_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Optimasi CB untuk {pasaran.upper()} sudah berjalan."}), 409
@@ -219,13 +232,14 @@ def start_evaluation(pasaran):
     evaluation_mode = request.form.get('evaluation_mode', 'quick') 
 
     try:
-        start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-        end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+        start_date = datetime.strptime(start_date_str, '%Y-m-d')
+        end_date = datetime.strptime(end_date_str, '%Y-m-d')
         if start_date > end_date:
             abort(400, description="Tanggal mulai tidak boleh setelah tanggal akhir.")
     except (ValueError, TypeError):
         abort(400, description="Format tanggal tidak valid. Gunakan YYYY-MM-DD.")
 
+    # UPDATED: Lock diperoleh SEBELUM pengecekan status untuk mencegah race condition
     with evaluation_lock:
         if evaluation_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Evaluasi untuk {pasaran.upper()} sudah berjalan."}), 409
@@ -266,6 +280,7 @@ def get_evaluation_status(pasaran):
 @app.route('/update-data', methods=['POST'])
 @validate_pasaran
 def update_data(pasaran):
+    # UPDATED: Lock diperoleh SEBELUM pengecekan status untuk mencegah race condition
     with update_lock:
         if update_status.get(pasaran) == 'running':
             return jsonify({"status": "error", "message": f"Proses update data untuk {pasaran.upper()} sudah berjalan."}), 409
