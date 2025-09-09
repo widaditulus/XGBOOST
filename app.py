@@ -1,4 +1,4 @@
-# app.py (VERSI FINAL TERPADU DAN DIAUDIT)
+# app.py (FINAL - PENANGANAN ERROR LEBIH BAIK)
 # BEJO
 # -*- coding: utf-8 -*-
 import os
@@ -11,9 +11,7 @@ from functools import wraps, lru_cache
 import pandas as pd
 import signal
 import sys
-# UPDATED: Impor Waitress untuk deployment produksi
 from waitress import serve
-# UPDATED: Impor dotenv
 import dotenv
 
 from predictor import ModelPredictor
@@ -25,7 +23,6 @@ from tuner import HyperparameterTuner
 
 app = Flask(__name__, template_folder='.', static_folder='.', static_url_path='')
 
-# PERBAIKAN: List untuk melacak semua thread yang aktif
 active_threads = []
 
 training_status = {}
@@ -36,10 +33,10 @@ update_status = {}
 update_lock = threading.Lock()
 tuning_status = {}
 tuning_lock = threading.Lock()
-cb_tuning_status = {} # Status terpisah untuk tuning CB
+cb_tuning_status = {} 
 cb_tuning_lock = threading.Lock()
 
-
+# ... (Kode errorhandler, validate_pasaran, get_predictor, index, data_status tetap sama)
 @app.errorhandler(Exception)
 def handle_unexpected_error(e):
     if hasattr(e, 'code') and 400 <= e.code < 600:
@@ -60,11 +57,6 @@ def validate_pasaran(f):
 
 @lru_cache(maxsize=10)
 def get_predictor(pasaran: str) -> ModelPredictor:
-    """
-    Mengambil atau membuat instance ModelPredictor untuk pasaran tertentu.
-    Cache di-manage oleh LRU untuk mencegah kebocoran memori.
-    lru_cache sudah thread-safe, jadi lock manual tidak diperlukan lagi.
-    """
     logger.info(f"LRU CACHE: Mengakses predictor untuk: {pasaran.upper()}")
     return ModelPredictor(pasaran)
 
@@ -83,11 +75,9 @@ def data_status(pasaran):
         logger.error(f"Gagal memeriksa status data untuk {pasaran}: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# PERBAIKAN: Wrapper untuk mengelola lifecycle thread
 def manage_thread(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        # Hapus thread yang sudah tidak aktif dari list
         active_threads[:] = [t for t in active_threads if t.is_alive()]
         
         thread = threading.Thread(target=func, args=args, kwargs=kwargs)
@@ -111,30 +101,32 @@ def start_training(pasaran):
         training_status[pasaran] = 'running'
         training_status[f"{pasaran}_message"] = "Proses training dimulai..."
 
-    # Gunakan wrapper untuk memulai thread
     run_training_in_background_threaded(pasaran, training_mode, use_recency_bias)
     return jsonify({"status": "success", "message": f"Proses training untuk {pasaran.upper()} telah dimulai."})
 
 @manage_thread
 def run_training_in_background_threaded(pasaran: str, training_mode: str, use_recency_bias: bool):
-    """Fungsi ini sekarang di-wrap oleh manage_thread."""
+    """Fungsi ini sekarang menangani TrainingError secara spesifik."""
     try:
         logger.info(f"Memulai thread training untuk pasaran: {pasaran} dengan mode: {training_mode}")
         predictor_to_train = get_predictor(pasaran)
         success = predictor_to_train.train_model(training_mode=training_mode, use_recency_bias=use_recency_bias)
         with training_lock:
-            if success:
-                training_status[pasaran] = "completed"
-                training_status[f"{pasaran}_message"] = f"Model untuk {pasaran.upper()} berhasil diperbarui."
-            else:
-                training_status[pasaran] = "failed"
-                training_status[f"{pasaran}_message"] = f"Gagal melatih model. Periksa log."
+            training_status[pasaran] = "completed"
+            training_status[f"{pasaran}_message"] = f"Model untuk {pasaran.upper()} berhasil diperbarui."
+    # UPDATED: Blok except diperbaiki untuk memberikan pesan error yang lebih baik
+    except TrainingError as e:
+        with training_lock:
+            training_status[pasaran] = "failed"
+            training_status[f"{pasaran}_message"] = f"Error Training: {str(e)}"
+        logger.error(f"TrainingError di thread training untuk {pasaran}: {e}", exc_info=True)
     except Exception as e:
         with training_lock:
             training_status[pasaran] = "failed"
-            training_status[f"{pasaran}_message"] = f"Error: {str(e)}"
+            training_status[f"{pasaran}_message"] = f"Error Tak Terduga: {str(e)}"
         logger.error(f"Exception di thread training untuk {pasaran}: {e}", exc_info=True)
 
+# ... (Sisa kode di app.py TIDAK ADA PERUBAHAN)
 @app.route('/training-status', methods=['GET'])
 @validate_pasaran
 def get_training_status(pasaran):
@@ -254,14 +246,12 @@ def run_evaluation_in_background_threaded(pasaran: str, start_date: datetime, en
         with evaluation_lock:
             evaluation_status[pasaran] = 'completed'
             evaluation_status[f"{pasaran}_data"] = result
-            # PERBAIKAN: Tambahkan pesan status di sini
             evaluation_status[f"{pasaran}_message"] = "Evaluasi selesai."
     except Exception as e:
         logger.error(f"Exception di thread evaluasi untuk {pasaran}: {e}", exc_info=True)
         with evaluation_lock:
             evaluation_status[pasaran] = 'failed'
             evaluation_status[f"{pasaran}_data"] = {"summary": {"error": f"Terjadi kesalahan: {str(e)}"}, "results": []}
-            # PERBAIKAN: Tambahkan pesan error di sini
             evaluation_status[f"{pasaran}_message"] = f"Evaluasi gagal: {str(e)}"
 
 @app.route('/evaluation-status', methods=['GET'])
@@ -270,7 +260,6 @@ def get_evaluation_status(pasaran):
     with evaluation_lock:
         status = evaluation_status.get(pasaran, 'idle')
         data = evaluation_status.get(f"{pasaran}_data", {})
-        # PERBAIKAN: Ambil pesan dari kamus status
         message = evaluation_status.get(f"{pasaran}_message", "Status evaluasi.")
     return jsonify({"status": status, "data": data, "message": message})
 

@@ -1,4 +1,4 @@
-# database.py (Final - Diperbaiki)
+# database.py (FINAL - Anti Duplikasi Data)
 # BEJO
 # -*- coding: utf-8 -*-
 import sqlite3
@@ -27,29 +27,52 @@ def get_latest_data(pasaran: str, limit: Optional[int] = None) -> Optional[pd.Da
     """Mengambil data historis terbaru dari database untuk pasaran tertentu."""
     with create_connection() as conn:
         table_name = f"data_{pasaran}"
+        # UPDATED: Periksa keberadaan tabel sebelum query
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}';")
+        if cursor.fetchone() is None:
+            logger.warning(f"Tabel {table_name} tidak ada di database.")
+            return pd.DataFrame(columns=['date', 'result']) # Kembalikan DataFrame kosong
+
         try:
             query = f"SELECT date, result FROM {table_name} ORDER BY date ASC"
             if limit:
                 query += f" LIMIT {limit}"
 
-            df = pd.read_sql_query(query, conn)
-            df['date'] = pd.to_datetime(df['date'])
+            df = pd.read_sql_query(query, conn, parse_dates=['date'])
             return df
-        except pd.io.sql.DatabaseError as e:
-            logger.warning(f"Tabel {table_name} mungkin kosong atau tidak ada. Error: {e}")
-            return None
+        except Exception as e:
+            logger.error(f"Error saat membaca dari tabel {table_name}: {e}")
+            return pd.DataFrame(columns=['date', 'result'])
 
 @error_handler(logger)
 def save_data_to_db(pasaran: str, df: pd.DataFrame):
-    """Menyimpan atau memperbarui data dari DataFrame ke database."""
+    """
+    Menyimpan atau memperbarui data dari DataFrame ke database.
+    UPDATED: Mencegah duplikasi data dengan memeriksa tanggal yang sudah ada.
+    """
     if df.empty:
         logger.warning(f"Tidak ada data untuk disimpan ke DB untuk pasaran: {pasaran}")
         return
 
+    table_name = f"data_{pasaran}"
     with create_connection() as conn:
-        table_name = f"data_{pasaran}"
-        df_to_save = df.copy()
-        df_to_save['date'] = df_to_save['date'].dt.strftime('%Y-%m-%d')
-        # UPDATED: Gunakan 'append' untuk menambahkan data dan mencegah 'OperationalError'.
+        # 1. Dapatkan tanggal yang sudah ada di database
+        try:
+            existing_dates_df = pd.read_sql_query(f"SELECT date FROM {table_name}", conn, parse_dates=['date'])
+            existing_dates = set(existing_dates_df['date'])
+        except (pd.io.sql.DatabaseError, sqlite3.OperationalError):
+            # Tabel belum ada, jadi tidak ada tanggal yang sudah ada
+            existing_dates = set()
+
+        # 2. Filter DataFrame untuk mendapatkan hanya data baru
+        df_to_save = df[~df['date'].isin(existing_dates)].copy()
+
+        if df_to_save.empty:
+            logger.info(f"Tidak ada data baru untuk disimpan ke DB untuk pasaran: {pasaran}")
+            return
+
+        # 3. Simpan hanya data baru
+        logger.info(f"Menyimpan {len(df_to_save)} baris data baru ke tabel {table_name}.")
+        # Menggunakan 'append' karena kita sudah memastikan datanya unik
         df_to_save.to_sql(table_name, conn, if_exists='append', index=False)
-    logger.info(f"Data untuk pasaran {pasaran} berhasil disimpan ke database.")
